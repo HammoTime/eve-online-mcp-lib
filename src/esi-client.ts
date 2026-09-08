@@ -1,4 +1,17 @@
-import { withSpan } from "./telemetry.js";
+import {
+  attributes,
+  cancellationSignal,
+  diagnostic,
+  withSpan,
+  withSpanSync,
+} from "./telemetry.js";
+import { SpanKind } from "@opentelemetry/api";
+import {
+  activeCapture,
+  dependencyInput,
+  safeMarketBody,
+  safeResponseHeaders,
+} from "./diagnostics.js";
 import {
   AuthenticationError,
   missingTokenScopes,
@@ -123,6 +136,46 @@ const RESPONSE_HEADERS = [
   "x-ratelimit-remaining",
   "x-ratelimit-used",
 ];
+
+async function readBoundedBody(
+  response: Response,
+  limit: number,
+): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0,
+    text = "";
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > limit) {
+        await reader.cancel();
+        throw new EsiRequestError(
+          "ESI response exceeds the byte safety limit",
+          response.status,
+          undefined,
+          { code: "RESPONSE_LIMIT", retryable: false },
+        );
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    attributes({ "eve.output.bytes": bytes });
+    return text + decoder.decode();
+  } catch (cause) {
+    if (cause instanceof EsiRequestError) throw cause;
+    throw new EsiRequestError(
+      "ESI response body could not be read",
+      response.status,
+      undefined,
+      { code: "NETWORK_ERROR", retryable: true },
+    );
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 function codeForStatus(status: number | undefined): EsiErrorCode {
   if (status === 401) return "AUTHENTICATION_REQUIRED";
@@ -411,40 +464,50 @@ export class EsiClient {
     requiredScopes: string[],
     characterId?: number,
   ): Promise<EsiAuthorization> {
-    return withSpan("eve.esi-client.authorize", {}, async () => {
-      if (
-        characterId !== undefined &&
-        (!Number.isSafeInteger(characterId) || characterId <= 0)
-      )
-        throw validationError("characterId must be a positive safe integer");
-      const scopes = [...new Set(requiredScopes)].sort();
-      if (scopes.length === 0) return { authorizationContext: "esi" };
-      let token: string | undefined;
-      try {
-        token = await this.tokenProvider.getAccessToken(scopes, characterId);
-      } catch (error) {
-        throw new EsiRequestError(
-          error instanceof Error ? error.message : "EVE authentication failed",
-          error instanceof AuthenticationError ? 403 : 401,
-          {
-            requiredScopes: scopes,
-            ...(characterId === undefined ? {} : { characterId }),
-            ...(error instanceof AuthenticationError ? error.details : {}),
-          },
-          {
-            code:
-              error instanceof AuthenticationError
-                ? error.code
-                : "AUTHENTICATION_FAILED",
-            retryable: false,
-          },
-        );
-      }
-      const checkedToken = this.requireToken(token, scopes, characterId);
-      const authorization: EsiAuthorization = { authorizationContext: "esi" };
-      this.authorizationTokens.set(authorization, checkedToken);
-      return authorization;
-    });
+    return withSpan(
+      "eve.esi-client.authorize",
+      {
+        "eve.auth.scope_count": requiredScopes.length,
+        "eve.auth.character_requested": characterId !== undefined,
+      },
+      async () => {
+        if (
+          characterId !== undefined &&
+          (!Number.isSafeInteger(characterId) || characterId <= 0)
+        )
+          throw validationError("characterId must be a positive safe integer");
+        const scopes = [...new Set(requiredScopes)].sort();
+        attributes({ "eve.auth.required": scopes.length > 0 });
+        if (scopes.length === 0) return { authorizationContext: "esi" };
+        let token: string | undefined;
+        try {
+          token = await this.tokenProvider.getAccessToken(scopes, characterId);
+        } catch (error) {
+          throw new EsiRequestError(
+            error instanceof Error
+              ? error.message
+              : "EVE authentication failed",
+            error instanceof AuthenticationError ? 403 : 401,
+            {
+              requiredScopes: scopes,
+              ...(characterId === undefined ? {} : { characterId }),
+              ...(error instanceof AuthenticationError ? error.details : {}),
+            },
+            {
+              code:
+                error instanceof AuthenticationError
+                  ? error.code
+                  : "AUTHENTICATION_FAILED",
+              retryable: false,
+            },
+          );
+        }
+        const checkedToken = this.requireToken(token, scopes, characterId);
+        const authorization: EsiAuthorization = { authorizationContext: "esi" };
+        this.authorizationTokens.set(authorization, checkedToken);
+        return authorization;
+      },
+    );
   }
 
   responseByteLength(response: EsiResponse): number {
@@ -459,9 +522,27 @@ export class EsiClient {
     authorization?: EsiAuthorization,
   ): Promise<EsiResponse> {
     return withSpan("eve.esi-client.call", {}, async () => {
+      const capture = activeCapture();
+      const ordinal = capture?.next() ?? 0;
       const operation = this.catalog.get(input.operationId);
-      const url = this.buildUrl(operation, input.path ?? {}, input.query ?? {});
-      const headers = this.buildHeaders(operation, input.headers ?? {});
+      const projected = dependencyInput(input, operation.operationId);
+      if (!projected.complete) capture?.incomplete("dependency_input_redacted");
+      if (operation.requiredScopes.length)
+        capture?.incomplete("private_dependency");
+      attributes({
+        ...projected.attributes,
+        "eve.esi.operation_id": operation.operationId,
+        "eve.esi.path_template": operation.path,
+        "eve.auth.required": operation.requiredScopes.length > 0,
+        "eve.auth.scope_count": operation.requiredScopes.length,
+        "eve.limit.response_bytes": this.options.maxResponseBytes ?? 5_000_000,
+      });
+      const url = withSpanSync("eve.esi.validate_url", () =>
+        this.buildUrl(operation, input.path ?? {}, input.query ?? {}),
+      );
+      const headers = withSpanSync("eve.esi.validate_headers", () =>
+        this.buildHeaders(operation, input.headers ?? {}),
+      );
       let body: string | undefined;
       if (operation.requestBodyRequired && input.body === undefined)
         throw validationError(
@@ -497,7 +578,14 @@ export class EsiClient {
         typeof input.path?.character_id === "number"
           ? input.path.character_id
           : input.actingCharacterId;
-      const token = await this.tokenFor(operation, authorization, characterId);
+      const token = await withSpan(
+        "eve.esi.authorize",
+        {
+          "eve.auth.required": operation.requiredScopes.length > 0,
+          "eve.auth.reused": authorization !== undefined,
+        },
+        () => this.tokenFor(operation, authorization, characterId),
+      );
       if (token) headers.set("authorization", `Bearer ${token}`);
       const cacheHeaders = [...headers.entries()].filter(
         ([name]) => name !== "authorization" && name !== "user-agent",
@@ -516,7 +604,22 @@ export class EsiClient {
       const cacheKey = `${operation.method}:${url.href}:${credentialContext}:${JSON.stringify(cacheHeaders)}`;
       const servedAt = this.now();
       const cached = this.cache.get(cacheKey);
+      diagnostic("eve.cache.lookup", {
+        "eve.cache.hit": !!cached && cached.expiresAt > servedAt,
+        "eve.cache.partition": token ? "protected" : "public",
+        "eve.clock.unix_ms": servedAt,
+        ...(cached ? { "eve.cache.expires_at_ms": cached.expiresAt } : {}),
+      });
       if (cached && cached.expiresAt > servedAt) {
+        capture?.incomplete("initial_cache_state_required");
+        await capture?.add({
+          ordinal,
+          operationId: operation.operationId,
+          input: projected.value,
+          cached: true,
+          startedAt: servedAt,
+          fetchedAt: Date.parse(cached.response.freshness.fetchedAt),
+        });
         const result: EsiResponse = {
           ...cached.response,
           cached: true,
@@ -529,122 +632,210 @@ export class EsiClient {
         return result;
       }
 
-      let response: Response;
-      try {
-        response = await withSpan(
-          "esi.http",
-          {
-            "http.request.method": operation.method,
-            "esi.operation": operation.operationId,
-          },
-          () =>
-            (this.options.fetchImplementation ?? fetch)(url, {
+      return withSpan(
+        `HTTP ${operation.method}`,
+        {
+          "http.request.method": operation.method,
+          "eve.esi.operation_id": operation.operationId,
+          "server.address": "esi.evetech.net",
+          "eve.dependency.attempt": 1,
+        },
+        async () => {
+          let response: Response;
+          const signal = cancellationSignal();
+          try {
+            response = await (this.options.fetchImplementation ?? fetch)(url, {
               method: operation.method,
               headers,
+              ...(signal ? { signal } : {}),
               ...(body === undefined ? {} : { body }),
-            }),
-        );
-      } catch (error) {
-        throw new EsiRequestError(
-          `ESI network request failed: ${error instanceof Error ? error.message : String(error)}`,
-          undefined,
-          undefined,
-          { code: "NETWORK_ERROR", retryable: true },
-        );
-      }
-      const contentLength = Number(response.headers.get("content-length") ?? 0);
-      const limit = this.options.maxResponseBytes ?? 5_000_000;
-      if (Number.isFinite(contentLength) && contentLength > limit)
-        throw new EsiRequestError(
-          `ESI response exceeds the ${limit} byte safety limit`,
-          response.status,
-          undefined,
-          { code: "RESPONSE_LIMIT", retryable: false },
-        );
+            });
+          } catch (error) {
+            if (cancellationSignal()?.aborted)
+              throw new DOMException("Operation cancelled", "AbortError");
+            await capture?.add({
+              ordinal,
+              operationId: operation.operationId,
+              input: projected.value,
+              cached: false,
+              startedAt: servedAt,
+              fetchedAt: this.now(),
+              errorCode: "NETWORK_ERROR",
+            });
+            throw new EsiRequestError(
+              `ESI network request failed: ${error instanceof Error ? error.message : String(error)}`,
+              undefined,
+              undefined,
+              { code: "NETWORK_ERROR", retryable: true },
+            );
+          }
+          const contentLength = Number(
+            response.headers.get("content-length") ?? 0,
+          );
+          const limit = this.options.maxResponseBytes ?? 5_000_000;
+          attributes({
+            "http.response.status_code": response.status,
+            "eve.limit.response_bytes": limit,
+          });
+          if (Number.isFinite(contentLength) && contentLength > limit) {
+            await response.body?.cancel();
+            throw new EsiRequestError(
+              `ESI response exceeds the ${limit} byte safety limit`,
+              response.status,
+              undefined,
+              { code: "RESPONSE_LIMIT", retryable: false },
+            );
+          }
 
-      const raw =
-        operation.method === "HEAD" ||
-        response.status === 204 ||
-        response.status === 304
-          ? ""
-          : await response.text();
-      const byteLength = new TextEncoder().encode(raw).byteLength;
-      if (byteLength > limit)
-        throw new EsiRequestError(
-          `ESI response exceeds the ${limit} byte safety limit`,
-          response.status,
-          undefined,
-          { code: "RESPONSE_LIMIT", retryable: false },
-        );
-      let data: JsonValue | string | null = null;
-      if (raw) {
-        try {
-          data = JSON.parse(raw) as JsonValue;
-        } catch {
-          data = raw;
-        }
-      }
+          const raw =
+            operation.method === "HEAD" ||
+            response.status === 204 ||
+            response.status === 304
+              ? ""
+              : await withSpan(
+                  "eve.esi.read_body",
+                  { "eve.limit.response_bytes": limit },
+                  () => readBoundedBody(response, limit),
+                );
+          const byteLength = new TextEncoder().encode(raw).byteLength;
+          if (byteLength > limit)
+            throw new EsiRequestError(
+              `ESI response exceeds the ${limit} byte safety limit`,
+              response.status,
+              undefined,
+              { code: "RESPONSE_LIMIT", retryable: false },
+            );
+          let data: JsonValue | string | null = null;
+          if (raw) {
+            try {
+              data = withSpanSync(
+                "eve.esi.decode_json",
+                () => JSON.parse(raw) as JsonValue,
+                { "eve.input.bytes": byteLength },
+              );
+            } catch {
+              data = raw;
+            }
+          }
 
-      const fetchedAt = this.now();
-      const responseHeaders = selectedHeaders(response.headers);
-      const policy = cacheExpiry(response.headers, operation, fetchedAt);
-      const modifiedAt = parseHttpDate(response.headers.get("last-modified"));
-      const result: EsiResponse = {
-        operationId: operation.operationId,
-        status: response.status,
-        url: url.href,
-        cached: false,
-        headers: responseHeaders,
-        data,
-        freshness: {
-          fetchedAt: new Date(fetchedAt).toISOString(),
-          servedAt: new Date(fetchedAt).toISOString(),
-          expiresAt:
-            policy.expiresAt === null
-              ? null
-              : new Date(policy.expiresAt).toISOString(),
-          sourceLastModified:
-            modifiedAt === null ? null : new Date(modifiedAt).toISOString(),
-        },
-        pagination: this.paginationFor(operation, input, responseHeaders),
-      };
-      this.responseSizes.set(result, byteLength);
-      if (!response.ok && response.status !== 304) {
-        const code = codeForStatus(response.status);
-        throw new EsiRequestError(
-          `ESI ${operation.operationId}${characterId === undefined ? "" : ` for character ${characterId}`} failed with HTTP ${response.status}`,
-          response.status,
-          response.status === 401 || response.status === 403
-            ? {
-                ...(characterId === undefined ? {} : { characterId }),
-                authenticatedCharacterId: token
-                  ? (characterIdFromToken(token) ?? null)
-                  : null,
-                requiredScopes: operation.requiredScopes,
-              }
-            : (data ?? undefined),
-          {
-            code,
-            retryable: retryableForCode(code),
-            retryAfterSeconds: parseRetryAfter(
-              response.headers.get("retry-after"),
+          const fetchedAt = this.now();
+          attributes({
+            "http.response.body.size": byteLength,
+            "eve.clock.unix_ms": fetchedAt,
+          });
+          if (capture) {
+            const safeHeaders = safeResponseHeaders(
+              response.headers,
+              operation.requiredScopes.length === 0 &&
+                operation.operationId === "GetMarketsRegionIdOrders",
+            );
+            const bodyAllowed =
+              operation.requiredScopes.length === 0 &&
+              safeMarketBody(raw, operation.operationId, response.status);
+            if (!bodyAllowed) capture.incomplete("dependency_body_redacted");
+            if (!safeHeaders.complete)
+              capture.incomplete("dependency_headers_redacted");
+            await capture.add({
+              ordinal,
+              operationId: operation.operationId,
+              input: projected.value,
+              cached: false,
+              startedAt: servedAt,
               fetchedAt,
-            ),
-          },
-        );
-      }
-      if (
-        operation.method === "GET" &&
-        response.ok &&
-        policy.cacheable &&
-        policy.expiresAt !== null
-      )
-        this.cache.set(cacheKey, {
-          expiresAt: policy.expiresAt,
-          response: result,
-          byteLength,
-        });
-      return result;
+              status: response.status,
+              headers: safeHeaders.values,
+              ...(bodyAllowed ? { body: raw } : {}),
+              bodyBytes: byteLength,
+            });
+          }
+          const responseHeaders = selectedHeaders(response.headers);
+          const policy = cacheExpiry(response.headers, operation, fetchedAt);
+          const modifiedAt = parseHttpDate(
+            response.headers.get("last-modified"),
+          );
+          const result: EsiResponse = {
+            operationId: operation.operationId,
+            status: response.status,
+            url: url.href,
+            cached: false,
+            headers: responseHeaders,
+            data,
+            freshness: {
+              fetchedAt: new Date(fetchedAt).toISOString(),
+              servedAt: new Date(fetchedAt).toISOString(),
+              expiresAt:
+                policy.expiresAt === null
+                  ? null
+                  : new Date(policy.expiresAt).toISOString(),
+              sourceLastModified:
+                modifiedAt === null ? null : new Date(modifiedAt).toISOString(),
+            },
+            pagination: this.paginationFor(operation, input, responseHeaders),
+          };
+          diagnostic("eve.esi.response", {
+            "http.response.status_code": response.status,
+            "eve.cache.cacheable": policy.cacheable,
+            "eve.response.bytes": byteLength,
+            "eve.pagination.current_page": result.pagination.currentPage ?? 0,
+            "eve.pagination.total_pages": result.pagination.totalPages ?? 0,
+            "eve.pagination.count_known": result.pagination.totalPages !== null,
+            ...(policy.expiresAt === null
+              ? {}
+              : { "eve.cache.expires_at_ms": policy.expiresAt }),
+            ...(response.status >= 400
+              ? {
+                  "eve.error.code": codeForStatus(response.status),
+                  "eve.error.retryable": retryableForCode(
+                    codeForStatus(response.status),
+                  ),
+                  "eve.retry.after_seconds":
+                    parseRetryAfter(
+                      response.headers.get("retry-after"),
+                      fetchedAt,
+                    ) ?? 0,
+                }
+              : {}),
+          });
+          this.responseSizes.set(result, byteLength);
+          if (!response.ok && response.status !== 304) {
+            const code = codeForStatus(response.status);
+            throw new EsiRequestError(
+              `ESI ${operation.operationId}${characterId === undefined ? "" : ` for character ${characterId}`} failed with HTTP ${response.status}`,
+              response.status,
+              response.status === 401 || response.status === 403
+                ? {
+                    ...(characterId === undefined ? {} : { characterId }),
+                    authenticatedCharacterId: token
+                      ? (characterIdFromToken(token) ?? null)
+                      : null,
+                    requiredScopes: operation.requiredScopes,
+                  }
+                : (data ?? undefined),
+              {
+                code,
+                retryable: retryableForCode(code),
+                retryAfterSeconds: parseRetryAfter(
+                  response.headers.get("retry-after"),
+                  fetchedAt,
+                ),
+              },
+            );
+          }
+          if (
+            operation.method === "GET" &&
+            response.ok &&
+            policy.cacheable &&
+            policy.expiresAt !== null
+          )
+            this.cache.set(cacheKey, {
+              expiresAt: policy.expiresAt,
+              response: result,
+              byteLength,
+            });
+          return result;
+        },
+        SpanKind.CLIENT,
+      );
     });
   }
 

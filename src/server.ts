@@ -1,4 +1,11 @@
-import { withSpan } from "./telemetry.js";
+import {
+  attributes,
+  diagnosticMetadata,
+  recordError,
+  withSpan,
+} from "./telemetry.js";
+import { projectOutput } from "./diagnostic-policy.js";
+import { ObservedMcpServer } from "./mcp-telemetry.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import {
@@ -21,7 +28,7 @@ import {
   SKILL_PLAN_QUEUE_POLICIES,
 } from "./skill-plan-guidance.js";
 import type { CharacterAuthentication } from "./character-authentication.js";
-import type { StaticDataSource } from "./static-data.js";
+import { observedStaticData, type StaticDataSource } from "./static-data.js";
 import { SkillPlanner } from "./skill-plan.js";
 import { planTargetSchema, targetListSchema } from "./skill-data.js";
 
@@ -49,18 +56,22 @@ const SERVER_INSTRUCTIONS = [
 ].join("\n");
 
 function textResult(value: unknown, isError = false) {
+  attributes(projectOutput(value));
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent: value as Record<string, unknown>,
+    _meta: diagnosticMetadata(),
     ...(isError ? { isError: true as const } : {}),
   };
 }
 
 function sharedErrorResult(error: unknown) {
+  recordError(error);
   const body = publicEsiError(error);
   return {
     content: [{ type: "text" as const, text: JSON.stringify(body, null, 2) }],
     structuredContent: body,
+    _meta: diagnosticMetadata(),
     isError: true as const,
   };
 }
@@ -75,7 +86,8 @@ export function createEveServer(
     hostedAuthorizationUrl?: string;
   },
 ): McpServer {
-  const { authentication, staticData } = options;
+  const { authentication } = options;
+  const staticData = observedStaticData(options.staticData);
   const errorResult = (error: unknown) => {
     const result = sharedErrorResult(error);
     const code = result.structuredContent.code;
@@ -88,6 +100,7 @@ export function createEveServer(
       ? {
           ...result,
           _meta: {
+            ...result._meta,
             "mcp/www_authenticate": [
               `Bearer resource_metadata="${new URL("/.well-known/oauth-protected-resource/mcp", options.hostedAuthorizationUrl).href}"`,
             ],
@@ -95,9 +108,17 @@ export function createEveServer(
         }
       : result;
   };
-  const server = new McpServer(options.identity, {
+  const server = new ObservedMcpServer(options.identity, {
     instructions: SERVER_INSTRUCTIONS,
   });
+  server.knownOperation = (name) => {
+    try {
+      catalog.get(name);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   const planner = new SkillPlanner(staticData, client);
   const targetsSchema = z
@@ -121,8 +142,8 @@ export function createEveServer(
     },
     async ({ refresh }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "initialize_static_data" },
+        "eve.tool.initialize_static_data",
+        { "gen_ai.tool.name": "initialize_static_data" },
         async () => {
           try {
             return textResult((await staticData.initialize(refresh)).status);
@@ -144,8 +165,8 @@ export function createEveServer(
     },
     async ({ target, targets }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "resolve_skill_plan_targets" },
+        "eve.tool.resolve_skill_plan_targets",
+        { "gen_ai.tool.name": "resolve_skill_plan_targets" },
         async () => {
           try {
             const { catalog, status } = await staticData.initialize();
@@ -173,8 +194,8 @@ export function createEveServer(
     },
     async ({ target, targets }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "get_skill_dependencies" },
+        "eve.tool.get_skill_dependencies",
+        { "gen_ai.tool.name": "get_skill_dependencies" },
         async () => {
           try {
             return textResult(
@@ -212,8 +233,8 @@ export function createEveServer(
     },
     async ({ characterId, target, targets, queuePolicy }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "generate_skill_plan" },
+        "eve.tool.generate_skill_plan",
+        { "gen_ai.tool.name": "generate_skill_plan" },
         async () => {
           try {
             return textResult(
@@ -249,8 +270,8 @@ export function createEveServer(
     },
     async () => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "list_eve_characters" },
+        "eve.tool.list_eve_characters",
+        { "gen_ai.tool.name": "list_eve_characters" },
         async () => {
           try {
             return textResult(await requireAuthentication().list());
@@ -277,8 +298,8 @@ export function createEveServer(
     },
     async ({ characterId }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "authorize_eve_character" },
+        "eve.tool.authorize_eve_character",
+        { "gen_ai.tool.name": "authorize_eve_character" },
         async () => {
           try {
             return textResult(
@@ -307,8 +328,8 @@ export function createEveServer(
     },
     async ({ characterId }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "select_eve_character" },
+        "eve.tool.select_eve_character",
+        { "gen_ai.tool.name": "select_eve_character" },
         async () => {
           try {
             return textResult(
@@ -354,8 +375,8 @@ export function createEveServer(
     },
     ({ query, tag, authenticated, limit, offset }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "search_esi_operations" },
+        "eve.tool.search_esi_operations",
+        { "gen_ai.tool.name": "search_esi_operations" },
         () => {
           const result = searchOperationsDetailed(catalog, {
             ...(query === undefined ? {} : { query }),
@@ -393,24 +414,28 @@ export function createEveServer(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     ({ operationId }) => {
-      return withSpan("mcp.tool", { "mcp.name": "get_esi_operation" }, () => {
-        try {
-          const operation = catalog.get(operationId);
-          return textResult({
-            ...publicOperation(operation),
-            parameters: operation.parameters.map((parameter) => ({
-              name: parameter.name,
-              in: parameter.in,
-              required: parameter.required ?? false,
-              description: parameter.description ?? "",
-              schema: catalog.resolvedSchema(parameter.schema ?? {}),
-            })),
-            ...operationGuidance(catalog, operation),
-          });
-        } catch (error) {
-          return errorResult(error);
-        }
-      });
+      return withSpan(
+        "eve.tool.get_esi_operation",
+        { "gen_ai.tool.name": "get_esi_operation" },
+        () => {
+          try {
+            const operation = catalog.get(operationId);
+            return textResult({
+              ...publicOperation(operation),
+              parameters: operation.parameters.map((parameter) => ({
+                name: parameter.name,
+                in: parameter.in,
+                required: parameter.required ?? false,
+                description: parameter.description ?? "",
+                schema: catalog.resolvedSchema(parameter.schema ?? {}),
+              })),
+              ...operationGuidance(catalog, operation),
+            });
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      );
     },
   );
 
@@ -446,22 +471,28 @@ export function createEveServer(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ operationId, actingCharacterId, path, query, headers, body }) => {
-      return withSpan("mcp.tool", { "mcp.name": "call_esi" }, async () => {
-        try {
-          return textResult(
-            await client.call({
-              operationId,
-              ...(actingCharacterId === undefined ? {} : { actingCharacterId }),
-              ...(path ? { path } : {}),
-              ...(query ? { query } : {}),
-              ...(headers ? { headers } : {}),
-              ...(body === undefined ? {} : { body }),
-            } satisfies EsiCallInput),
-          );
-        } catch (error) {
-          return errorResult(error);
-        }
-      });
+      return withSpan(
+        "eve.tool.call_esi",
+        { "gen_ai.tool.name": "call_esi" },
+        async () => {
+          try {
+            return textResult(
+              await client.call({
+                operationId,
+                ...(actingCharacterId === undefined
+                  ? {}
+                  : { actingCharacterId }),
+                ...(path ? { path } : {}),
+                ...(query ? { query } : {}),
+                ...(headers ? { headers } : {}),
+                ...(body === undefined ? {} : { body }),
+              } satisfies EsiCallInput),
+            );
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      );
     },
   );
 
@@ -485,8 +516,8 @@ export function createEveServer(
     },
     async (input) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "resolve_eve_entities" },
+        "eve.tool.resolve_eve_entities",
+        { "gen_ai.tool.name": "resolve_eve_entities" },
         async () => {
           try {
             return textResult(
@@ -538,8 +569,8 @@ export function createEveServer(
     },
     async ({ characterId, sections }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "get_character_context" },
+        "eve.tool.get_character_context",
+        { "gen_ai.tool.name": "get_character_context" },
         async () => {
           try {
             const result = await getCharacterContext(client, catalog, {
@@ -573,8 +604,8 @@ export function createEveServer(
     },
     async ({ regionId, typeId, locationId, maxPages }) => {
       return withSpan(
-        "mcp.tool",
-        { "mcp.name": "get_market_snapshot" },
+        "eve.tool.get_market_snapshot",
+        { "gen_ai.tool.name": "get_market_snapshot" },
         async () => {
           try {
             return textResult(

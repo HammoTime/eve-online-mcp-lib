@@ -73,8 +73,10 @@ The library uses only the OpenTelemetry API. With no SDK it is a no-op; the host
 owns the context manager, exporter, sampling and lifecycle. MCP tool/resource/
 prompt handlers, ESI calls and network requests, token refresh, static parsing,
 entity resolution, market and character summaries, skill graphs and plans emit
-spans. Exceptions are marked as failures without recording messages, arguments,
-tokens or returned data. Operation metrics use fixed names and bounded labels.
+spans. Closed field projections record reviewed public inputs, effective limits,
+branch decisions, clocks, output counts and stable error codes. Credentials,
+private character state, free text and raw exception messages remain excluded.
+Operation metrics use fixed names and bounded labels.
 
 Hosts with a process-wide SDK can use its global tracer. Workers can bind a
 per-invocation tracer with `withTracer(tracer, operation)` from `src/telemetry.ts`.
@@ -82,6 +84,11 @@ That tracer follows the active OpenTelemetry context through async operations,
 so service bindings and durable workflow steps can preserve W3C parent context.
 Configure a metrics provider in the host to enable the library's metric instruments.
 The library never initializes an SDK or exports data itself.
+
+The optional `adapters/telemetry-runtime.ts` supplies a bounded SDK implementation
+for hosts. It provides real delta metrics, correlated OTLP logs, and diagnostic
+artifact hooks. See [diagnostic capture and offline replay](docs/diagnostics.md)
+for the evidence contract, limits, supported replay boundaries and commands.
 
 `createEveServer` accepts `hostedAuthorizationUrl` to add MCP OAuth challenge
 metadata to auth errors. A hosted character adapter may return

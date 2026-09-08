@@ -1,4 +1,6 @@
-import { withSpan } from "./telemetry.js";
+import { DiagnosticError } from "./diagnostic-error.js";
+import { attributes, diagnostic, withSpan, withSpanSync } from "./telemetry.js";
+import { projectInput, projectOutput } from "./diagnostic-policy.js";
 import * as z from "zod/v4";
 import type { EsiClient, EsiResponse } from "./esi-client.js";
 import {
@@ -55,7 +57,8 @@ function complete(response: EsiResponse) {
     response.pagination.hasMore === true ||
     (response.pagination.totalPages ?? 1) > 1
   )
-    throw new Error(
+    throw new DiagnosticError(
+      "SKILL_EVIDENCE_INCOMPLETE",
       "A complete successful character response is required; missing progress cannot be treated as zero",
     );
   return response.data;
@@ -67,34 +70,69 @@ export class SkillPlanner {
     private readonly client: EsiClient,
   ) {}
   async dependencies(targets: PlanTarget[]) {
-    const { catalog, status } = await this.source.initialize();
-    const resolvedTargets = targets.map((target) => catalog.resolve(target));
-    if (resolvedTargets.some((target) => target.status !== "resolved"))
-      return {
-        status: "needs_target_selection",
-        resolvedTargets,
-        staticData: status,
-      };
-    const requirements = resolvedTargets.flatMap((target) =>
-      target.status === "resolved" ? target.requirements : [],
+    return withSpan(
+      "eve.skill_plan.dependencies",
+      projectInput({ targets }).attributes,
+      async () => {
+        const { catalog, status } = await withSpan(
+          "eve.static_data.initialize",
+          {},
+          () => this.source.initialize(),
+        );
+        const resolvedTargets = withSpanSync(
+          "eve.skill_plan.resolve_targets",
+          () => targets.map((target) => catalog.resolve(target)),
+        );
+        if (resolvedTargets.some((target) => target.status !== "resolved"))
+          return {
+            status: "needs_target_selection",
+            resolvedTargets,
+            staticData: status,
+          };
+        const requirements = resolvedTargets.flatMap((target) =>
+          target.status === "resolved" ? target.requirements : [],
+        );
+        return {
+          status: "complete",
+          resolvedTargets,
+          staticData: status,
+          graph: buildSkillGraph(catalog, requirements),
+          scope:
+            "Permanent training prerequisites and minimum hull requirements; fitting and clone eligibility are separate.",
+        };
+      },
     );
-    return {
-      status: "complete",
-      resolvedTargets,
-      staticData: status,
-      graph: buildSkillGraph(catalog, requirements),
-      scope:
-        "Permanent training prerequisites and minimum hull requirements; fitting and clone eligibility are separate.",
-    };
   }
   async generate(input: SkillPlanInput) {
-    return withSpan("eve.skill_plan.generate", {}, () => this.compute(input));
+    return withSpan(
+      "eve.skill_plan.generate",
+      {
+        ...projectInput(input).attributes,
+        "eve.effective.queuePolicy": input.queuePolicy ?? "preserve",
+        "eve.input.queuePolicy_present": input.queuePolicy !== undefined,
+      },
+      async () => {
+        const result = await this.compute(input);
+        attributes(projectOutput(result));
+        return result;
+      },
+    );
   }
   private async compute(input: SkillPlanInput) {
-    const { catalog, status } = await this.source.initialize();
-    const resolvedTargets = input.targets.map((target) =>
-      catalog.resolve(target),
+    const { catalog, status } = await withSpan(
+      "eve.static_data.initialize",
+      {},
+      () => this.source.initialize(),
     );
+    const resolvedTargets = withSpanSync("eve.skill_plan.resolve_targets", () =>
+      input.targets.map((target) => catalog.resolve(target)),
+    );
+    diagnostic("eve.skill_plan.targets_resolved", {
+      "eve.input.target_count": input.targets.length,
+      "eve.output.resolved_count": resolvedTargets.filter(
+        (t) => t.status === "resolved",
+      ).length,
+    });
     // Resolve public targets before triggering character authorization.
     if (resolvedTargets.some((target) => target.status !== "resolved"))
       return {
@@ -123,16 +161,23 @@ export class SkillPlanner {
       },
       authorization,
     );
-    const skills = skillsSchema.parse(complete(skillsResponse));
-    const queue = queueSchema
-      .parse(complete(queueResponse))
-      .sort((a, b) => a.queue_position - b.queue_position);
+    const skills = withSpanSync("eve.skill_plan.validate_skills", () =>
+      skillsSchema.parse(complete(skillsResponse)),
+    );
+    const queue = withSpanSync("eve.skill_plan.validate_queue", () =>
+      queueSchema
+        .parse(complete(queueResponse))
+        .sort((a, b) => a.queue_position - b.queue_position),
+    );
     if (
       new Set(skills.skills.map((skill) => skill.skill_id)).size !==
         skills.skills.length ||
       new Set(queue.map((row) => row.queue_position)).size !== queue.length
     )
-      throw new Error("Duplicate skill or queue-position evidence");
+      throw new DiagnosticError(
+        "SKILL_EVIDENCE_DUPLICATE",
+        "Duplicate skill or queue-position evidence",
+      );
     const trained = new Map(
       skills.skills.map((skill) => [skill.skill_id, skill.trained_skill_level]),
     );
@@ -149,15 +194,25 @@ export class SkillPlanner {
     const commitments: Requirement[] = [];
     const commitmentPoints = new Map<number, number>();
     const completedAt = Date.parse(queueResponse.freshness.fetchedAt);
+    diagnostic("eve.skill_plan.evidence", {
+      "eve.input.skills_count": skills.skills.length,
+      "eve.input.queue_count": queue.length,
+      "eve.clock.completed_at_ms": completedAt,
+      "eve.effective.queuePolicy": policy,
+    });
     const queueKeys = new Set<string>();
     for (const row of queue) {
       const key = `${row.skill_id}:${row.finished_level}`;
       if (queueKeys.has(key))
-        throw new Error("Duplicate skill-level entries in observed queue");
+        throw new DiagnosticError(
+          "QUEUE_LEVEL_DUPLICATE",
+          "Duplicate skill-level entries in observed queue",
+        );
       queueKeys.add(key);
       if ((trained.get(row.skill_id) ?? 0) >= row.finished_level) continue;
       if (row.finish_date && Date.parse(row.finish_date) <= completedAt)
-        throw new Error(
+        throw new DiagnosticError(
+          "QUEUE_COMPLETED_CONFLICT",
           "Completed queue entries conflict with the skills snapshot. Refresh character skills before producing an importable plan.",
         );
       if (
@@ -165,14 +220,20 @@ export class SkillPlanner {
         row.finish_date &&
         Date.parse(row.start_date) >= Date.parse(row.finish_date)
       )
-        throw new Error("Invalid queue timestamps");
+        throw new DiagnosticError(
+          "QUEUE_TIME_ORDER",
+          "Invalid queue timestamps",
+        );
       const skill = catalog.skill(row.skill_id);
       const estimated = skillPoints(skill.rank, row.finished_level);
       if (
         row.level_end_sp !== undefined &&
         Math.abs(row.level_end_sp - estimated) > 1
       )
-        throw new Error("Queue SP threshold conflicts with the SDE skill rank");
+        throw new DiagnosticError(
+          "QUEUE_SP_THRESHOLD",
+          "Queue SP threshold conflicts with the SDE skill rank",
+        );
       commitments.push({ skillId: row.skill_id, level: row.finished_level });
       commitmentPoints.set(
         row.skill_id,
@@ -194,18 +255,34 @@ export class SkillPlanner {
       policy === "reorder" ? [...requirements, ...commitments] : requirements;
     const graph = buildSkillGraph(catalog, allTargets, baseline);
     const finalLevels = replayTraining(catalog, graph.nodes, baseline);
-    if (
-      allTargets.some((req) => (finalLevels.get(req.skillId) ?? 0) < req.level)
-    )
-      throw new Error("Skill plan does not satisfy every target");
-    const rows = planRows(
-      catalog,
-      graph.nodes,
-      baseline,
-      baselinePoints,
-      trained,
-      active,
+    withSpanSync("eve.skill_plan.verify_targets", () => {
+      if (
+        allTargets.some(
+          (req) => (finalLevels.get(req.skillId) ?? 0) < req.level,
+        )
+      )
+        throw new DiagnosticError(
+          "PLAN_TARGET_UNSATISFIED",
+          "Skill plan does not satisfy every target",
+        );
+    });
+    const rows = withSpanSync(
+      "eve.skill_plan.rows",
+      () =>
+        planRows(
+          catalog,
+          graph.nodes,
+          baseline,
+          baselinePoints,
+          trained,
+          active,
+        ),
+      { "eve.input.node_count": graph.nodes.length },
     );
+    attributes({
+      "eve.output.plan_row_count": rows.length,
+      "eve.output.target_count": allTargets.length,
+    });
     const additionalSkillPointsEstimate = rows.reduce(
       (sum, row) => sum + row.remainingSkillPointsEstimate,
       0,
@@ -284,7 +361,8 @@ function planRows(
       observedSP < skillPoints(skill.rank, current) - 1 ||
       (current < 5 && observedSP > skillPoints(skill.rank, current + 1))
     )
-      throw new Error(
+      throw new DiagnosticError(
+        "PLAN_SP_BASELINE",
         `Inconsistent level/SP baseline for ${skill.id}; refresh skills`,
       );
     const before = charged.has(skill.id)
