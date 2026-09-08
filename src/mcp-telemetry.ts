@@ -93,10 +93,15 @@ export class ObservedMcpServer extends McpServer {
   private readonly creationContext = context.active();
   knownOperation: (name: string) => boolean = () => false;
   trustedTraceContext = false;
+  /** Transport-supplied revision hint; initialize and per-request metadata take precedence. */
+  protocolVersionHint: string | undefined;
   override async connect(transport: Transport): Promise<void> {
     const pending = new Map<string | number, Pending>();
     const hostContext = telemetryContext(this.creationContext);
-    let version = "unknown";
+    let version =
+      this.protocolVersionHint && VERSIONS.has(this.protocolVersionHint)
+        ? this.protocolVersionHint
+        : "unknown";
     const finish = (
       id: string | number,
       message?: Message,

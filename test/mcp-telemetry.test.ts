@@ -25,6 +25,7 @@ it.each(["delayed_send", "failed_send", "cancelled", "validation"] as const)(
       spanProcessors: [new SimpleSpanProcessor(exporter)],
     });
     const server = new ObservedMcpServer({ name: "test", version: "1" });
+    server.protocolVersionHint = "2025-11-25";
     let started = false,
       sending = false;
     let release = () => {
