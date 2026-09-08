@@ -1,3 +1,4 @@
+import { withSpan } from "./telemetry.js";
 import { decodeJwt } from "jose";
 
 export const DEFAULT_EVE_CLIENT_ID = "6a65f1e650d240659dafbad29fb55e05";
@@ -67,57 +68,59 @@ export class RefreshTokenProvider implements TokenProvider {
   }
 
   private async refresh(): Promise<string> {
-    const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: this.currentRefreshToken,
-    });
-    const headers = new Headers({
-      "content-type": "application/x-www-form-urlencoded",
-    });
-    if (this.clientSecret) {
-      headers.set(
-        "authorization",
-        `Basic ${btoa(String.fromCharCode(...new TextEncoder().encode(`${this.clientId}:${this.clientSecret}`)))}`,
-      );
-    } else {
-      body.set("client_id", this.clientId);
-    }
+    return withSpan("eve.auth.refresh", {}, async () => {
+      const body = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: this.currentRefreshToken,
+      });
+      const headers = new Headers({
+        "content-type": "application/x-www-form-urlencoded",
+      });
+      if (this.clientSecret) {
+        headers.set(
+          "authorization",
+          `Basic ${btoa(String.fromCharCode(...new TextEncoder().encode(`${this.clientId}:${this.clientSecret}`)))}`,
+        );
+      } else {
+        body.set("client_id", this.clientId);
+      }
 
-    const response = await this.fetchImplementation(
-      "https://login.eveonline.com/v2/oauth/token",
-      {
-        method: "POST",
-        headers,
-        body,
-      },
-    );
-    if (!response.ok)
-      throw new Error(
-        `EVE SSO token refresh failed with HTTP ${response.status}`,
+      const response = await this.fetchImplementation(
+        "https://login.eveonline.com/v2/oauth/token",
+        {
+          method: "POST",
+          headers,
+          body,
+        },
       );
-    const value = (await response.json()) as RefreshResponse;
-    if (
-      typeof value.access_token !== "string" ||
-      !value.access_token ||
-      !Number.isFinite(value.expires_in) ||
-      value.expires_in <= 0 ||
-      (value.refresh_token !== undefined &&
-        (typeof value.refresh_token !== "string" || !value.refresh_token))
-    )
-      throw new Error("EVE SSO returned an invalid token response");
-    await this.verifyAccessToken?.(value.access_token);
-    if (
-      value.refresh_token &&
-      value.refresh_token !== this.currentRefreshToken
-    ) {
-      await this.onRefreshToken?.(value.refresh_token);
-      this.currentRefreshToken = value.refresh_token;
-    }
-    this.cached = {
-      token: value.access_token,
-      expiresAt: Date.now() + value.expires_in * 1000,
-    };
-    return value.access_token;
+      if (!response.ok)
+        throw new Error(
+          `EVE SSO token refresh failed with HTTP ${response.status}`,
+        );
+      const value = (await response.json()) as RefreshResponse;
+      if (
+        typeof value.access_token !== "string" ||
+        !value.access_token ||
+        !Number.isFinite(value.expires_in) ||
+        value.expires_in <= 0 ||
+        (value.refresh_token !== undefined &&
+          (typeof value.refresh_token !== "string" || !value.refresh_token))
+      )
+        throw new Error("EVE SSO returned an invalid token response");
+      await this.verifyAccessToken?.(value.access_token);
+      if (
+        value.refresh_token &&
+        value.refresh_token !== this.currentRefreshToken
+      ) {
+        await this.onRefreshToken?.(value.refresh_token);
+        this.currentRefreshToken = value.refresh_token;
+      }
+      this.cached = {
+        token: value.access_token,
+        expiresAt: Date.now() + value.expires_in * 1000,
+      };
+      return value.access_token;
+    });
   }
 }
 

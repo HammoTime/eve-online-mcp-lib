@@ -1,3 +1,4 @@
+import { withSpan } from "./telemetry.js";
 import * as z from "zod/v4";
 import type { EsiClient, EsiResponse } from "./esi-client.js";
 import {
@@ -87,6 +88,9 @@ export class SkillPlanner {
     };
   }
   async generate(input: SkillPlanInput) {
+    return withSpan("eve.skill_plan.generate", {}, () => this.compute(input));
+  }
+  private async compute(input: SkillPlanInput) {
     const { catalog, status } = await this.source.initialize();
     const resolvedTargets = input.targets.map((target) =>
       catalog.resolve(target),

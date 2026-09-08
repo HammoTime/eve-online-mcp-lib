@@ -1,7 +1,7 @@
 # EVE Online MCP library
 
 Shared, runtime-independent TypeScript source for the local `eve-online-mcp`
-application and the future `eve-online-hosted-mcp` Workers service. This public
+application and the `eve-online-hosted-mcp` Workers service. This public
 repository is consumed as a Git submodule pinned to a reviewed commit, not as an
 independently published npm package. Licensed AGPL-3.0-only; extracted from
 `HammoTime/eve-online-mcp` at `05ca567`.
@@ -50,7 +50,7 @@ const server = createEveServer(catalog, client, {
 });
 ```
 
-Applications supply `@modelcontextprotocol/server`, `jose`, and `zod` using the
+Applications supply `@modelcontextprotocol/server`, `@opentelemetry/api`, `jose`, and `zod` using the
 compatible ranges in `package.json`. The `.js` imports resolve to `.ts` source
 during TypeScript compilation. Build the submodule with the consumer; no npm
 workspace, sibling checkout, or separately published artifact is required.
@@ -64,9 +64,31 @@ Refresh providers must receive an identity-verification callback and a durable
 rotation callback in authenticated applications.
 
 `StaticDataSource.initialize()` returns one validated `SkillCatalog` and its
-freshness status for a plan. A D1 adapter and the four-hour ETag-only update check
-will be implemented in the hosted application in the next stage. They are not
-implemented here.
+freshness status for a plan. The hosted application supplies the D1 adapter,
+full-SDE import workflow and four-hour ETag check.
+
+## OpenTelemetry and hosted authorization
+
+The library uses only the OpenTelemetry API. With no SDK it is a no-op; the host
+owns the context manager, exporter, sampling and lifecycle. MCP tool/resource/
+prompt handlers, ESI calls and network requests, token refresh, static parsing,
+entity resolution, market and character summaries, skill graphs and plans emit
+spans. Exceptions are marked as failures without recording messages, arguments,
+tokens or returned data. Operation metrics use fixed names and bounded labels.
+
+Hosts with a process-wide SDK can use its global tracer. Workers can bind a
+per-invocation tracer with `withTracer(tracer, operation)` from `src/telemetry.ts`.
+That tracer follows the active OpenTelemetry context through async operations,
+so service bindings and durable workflow steps can preserve W3C parent context.
+Configure a metrics provider in the host to enable the library's metric instruments.
+The library never initializes an SDK or exports data itself.
+
+`createEveServer` accepts `hostedAuthorizationUrl` to add MCP OAuth challenge
+metadata to auth errors. A hosted character adapter may return
+`status: "authorization_required"` and a browser URL instead of starting a local
+browser. Existing local adapters remain compatible. `call_esi.actingCharacterId`
+selects credentials for protected operations that lack a character path parameter;
+it is validated separately and is never forwarded as an ESI parameter.
 
 ## Development
 

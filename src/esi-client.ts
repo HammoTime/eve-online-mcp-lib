@@ -1,3 +1,4 @@
+import { withSpan } from "./telemetry.js";
 import {
   AuthenticationError,
   missingTokenScopes,
@@ -16,6 +17,8 @@ import type {
 
 export interface EsiCallInput {
   operationId: string;
+  /** Execution identity only; never serialized as an ESI parameter. */
+  actingCharacterId?: number;
   path?: Record<string, JsonValue>;
   query?: Record<string, JsonValue>;
   headers?: Record<string, JsonValue>;
@@ -408,38 +411,40 @@ export class EsiClient {
     requiredScopes: string[],
     characterId?: number,
   ): Promise<EsiAuthorization> {
-    if (
-      characterId !== undefined &&
-      (!Number.isSafeInteger(characterId) || characterId <= 0)
-    )
-      throw validationError("characterId must be a positive safe integer");
-    const scopes = [...new Set(requiredScopes)].sort();
-    if (scopes.length === 0) return { authorizationContext: "esi" };
-    let token: string | undefined;
-    try {
-      token = await this.tokenProvider.getAccessToken(scopes, characterId);
-    } catch (error) {
-      throw new EsiRequestError(
-        error instanceof Error ? error.message : "EVE authentication failed",
-        error instanceof AuthenticationError ? 403 : 401,
-        {
-          requiredScopes: scopes,
-          ...(characterId === undefined ? {} : { characterId }),
-          ...(error instanceof AuthenticationError ? error.details : {}),
-        },
-        {
-          code:
-            error instanceof AuthenticationError
-              ? error.code
-              : "AUTHENTICATION_FAILED",
-          retryable: false,
-        },
-      );
-    }
-    const checkedToken = this.requireToken(token, scopes, characterId);
-    const authorization: EsiAuthorization = { authorizationContext: "esi" };
-    this.authorizationTokens.set(authorization, checkedToken);
-    return authorization;
+    return withSpan("eve.esi-client.authorize", {}, async () => {
+      if (
+        characterId !== undefined &&
+        (!Number.isSafeInteger(characterId) || characterId <= 0)
+      )
+        throw validationError("characterId must be a positive safe integer");
+      const scopes = [...new Set(requiredScopes)].sort();
+      if (scopes.length === 0) return { authorizationContext: "esi" };
+      let token: string | undefined;
+      try {
+        token = await this.tokenProvider.getAccessToken(scopes, characterId);
+      } catch (error) {
+        throw new EsiRequestError(
+          error instanceof Error ? error.message : "EVE authentication failed",
+          error instanceof AuthenticationError ? 403 : 401,
+          {
+            requiredScopes: scopes,
+            ...(characterId === undefined ? {} : { characterId }),
+            ...(error instanceof AuthenticationError ? error.details : {}),
+          },
+          {
+            code:
+              error instanceof AuthenticationError
+                ? error.code
+                : "AUTHENTICATION_FAILED",
+            retryable: false,
+          },
+        );
+      }
+      const checkedToken = this.requireToken(token, scopes, characterId);
+      const authorization: EsiAuthorization = { authorizationContext: "esi" };
+      this.authorizationTokens.set(authorization, checkedToken);
+      return authorization;
+    });
   }
 
   responseByteLength(response: EsiResponse): number {
@@ -453,168 +458,194 @@ export class EsiClient {
     input: EsiCallInput,
     authorization?: EsiAuthorization,
   ): Promise<EsiResponse> {
-    const operation = this.catalog.get(input.operationId);
-    const url = this.buildUrl(operation, input.path ?? {}, input.query ?? {});
-    const headers = this.buildHeaders(operation, input.headers ?? {});
-    let body: string | undefined;
-    if (operation.requestBodyRequired && input.body === undefined)
-      throw validationError(
-        `Operation ${operation.operationId} requires a JSON body`,
-      );
-    if (input.body !== undefined) {
-      if (!operation.requestBodySchema)
+    return withSpan("eve.esi-client.call", {}, async () => {
+      const operation = this.catalog.get(input.operationId);
+      const url = this.buildUrl(operation, input.path ?? {}, input.query ?? {});
+      const headers = this.buildHeaders(operation, input.headers ?? {});
+      let body: string | undefined;
+      if (operation.requestBodyRequired && input.body === undefined)
         throw validationError(
-          `Operation ${operation.operationId} does not accept a JSON body`,
+          `Operation ${operation.operationId} requires a JSON body`,
         );
-      validateValue("body", input.body, operation.requestBodySchema);
-      body = JSON.stringify(input.body);
-      headers.set("content-type", "application/json");
-    }
-
-    const characterId =
-      typeof input.path?.character_id === "number"
-        ? input.path.character_id
-        : undefined;
-    const token = await this.tokenFor(operation, authorization, characterId);
-    if (token) headers.set("authorization", `Bearer ${token}`);
-    const cacheHeaders = [...headers.entries()].filter(
-      ([name]) => name !== "authorization" && name !== "user-agent",
-    );
-    const credentialContext = token
-      ? Array.from(
-          new Uint8Array(
-            await crypto.subtle.digest(
-              "SHA-256",
-              new TextEncoder().encode(token),
-            ),
-          ),
-          (byte) => byte.toString(16).padStart(2, "0"),
-        ).join("")
-      : "public";
-    const cacheKey = `${operation.method}:${url.href}:${credentialContext}:${JSON.stringify(cacheHeaders)}`;
-    const servedAt = this.now();
-    const cached = this.cache.get(cacheKey);
-    if (cached && cached.expiresAt > servedAt) {
-      const result: EsiResponse = {
-        ...cached.response,
-        cached: true,
-        freshness: {
-          ...cached.response.freshness,
-          servedAt: new Date(servedAt).toISOString(),
-        },
-      };
-      this.responseSizes.set(result, cached.byteLength);
-      return result;
-    }
-
-    let response: Response;
-    try {
-      response = await (this.options.fetchImplementation ?? fetch)(url, {
-        method: operation.method,
-        headers,
-        ...(body === undefined ? {} : { body }),
-      });
-    } catch (error) {
-      throw new EsiRequestError(
-        `ESI network request failed: ${error instanceof Error ? error.message : String(error)}`,
-        undefined,
-        undefined,
-        { code: "NETWORK_ERROR", retryable: true },
-      );
-    }
-    const contentLength = Number(response.headers.get("content-length") ?? 0);
-    const limit = this.options.maxResponseBytes ?? 5_000_000;
-    if (Number.isFinite(contentLength) && contentLength > limit)
-      throw new EsiRequestError(
-        `ESI response exceeds the ${limit} byte safety limit`,
-        response.status,
-        undefined,
-        { code: "RESPONSE_LIMIT", retryable: false },
-      );
-
-    const raw =
-      operation.method === "HEAD" ||
-      response.status === 204 ||
-      response.status === 304
-        ? ""
-        : await response.text();
-    const byteLength = new TextEncoder().encode(raw).byteLength;
-    if (byteLength > limit)
-      throw new EsiRequestError(
-        `ESI response exceeds the ${limit} byte safety limit`,
-        response.status,
-        undefined,
-        { code: "RESPONSE_LIMIT", retryable: false },
-      );
-    let data: JsonValue | string | null = null;
-    if (raw) {
-      try {
-        data = JSON.parse(raw) as JsonValue;
-      } catch {
-        data = raw;
+      if (input.body !== undefined) {
+        if (!operation.requestBodySchema)
+          throw validationError(
+            `Operation ${operation.operationId} does not accept a JSON body`,
+          );
+        validateValue("body", input.body, operation.requestBodySchema);
+        body = JSON.stringify(input.body);
+        headers.set("content-type", "application/json");
       }
-    }
 
-    const fetchedAt = this.now();
-    const responseHeaders = selectedHeaders(response.headers);
-    const policy = cacheExpiry(response.headers, operation, fetchedAt);
-    const modifiedAt = parseHttpDate(response.headers.get("last-modified"));
-    const result: EsiResponse = {
-      operationId: operation.operationId,
-      status: response.status,
-      url: url.href,
-      cached: false,
-      headers: responseHeaders,
-      data,
-      freshness: {
-        fetchedAt: new Date(fetchedAt).toISOString(),
-        servedAt: new Date(fetchedAt).toISOString(),
-        expiresAt:
-          policy.expiresAt === null
-            ? null
-            : new Date(policy.expiresAt).toISOString(),
-        sourceLastModified:
-          modifiedAt === null ? null : new Date(modifiedAt).toISOString(),
-      },
-      pagination: this.paginationFor(operation, input, responseHeaders),
-    };
-    this.responseSizes.set(result, byteLength);
-    if (!response.ok && response.status !== 304) {
-      const code = codeForStatus(response.status);
-      throw new EsiRequestError(
-        `ESI ${operation.operationId}${characterId === undefined ? "" : ` for character ${characterId}`} failed with HTTP ${response.status}`,
-        response.status,
-        response.status === 401 || response.status === 403
-          ? {
-              ...(characterId === undefined ? {} : { characterId }),
-              authenticatedCharacterId: token
-                ? (characterIdFromToken(token) ?? null)
-                : null,
-              requiredScopes: operation.requiredScopes,
-            }
-          : (data ?? undefined),
-        {
-          code,
-          retryable: retryableForCode(code),
-          retryAfterSeconds: parseRetryAfter(
-            response.headers.get("retry-after"),
-            fetchedAt,
-          ),
-        },
+      if (
+        input.actingCharacterId !== undefined &&
+        (!Number.isSafeInteger(input.actingCharacterId) ||
+          input.actingCharacterId <= 0)
+      )
+        throw validationError(
+          "actingCharacterId must be a positive safe integer",
+        );
+      if (
+        typeof input.path?.character_id === "number" &&
+        input.actingCharacterId !== undefined &&
+        input.path.character_id !== input.actingCharacterId
+      )
+        throw validationError(
+          "actingCharacterId must match the character path",
+        );
+      const characterId =
+        typeof input.path?.character_id === "number"
+          ? input.path.character_id
+          : input.actingCharacterId;
+      const token = await this.tokenFor(operation, authorization, characterId);
+      if (token) headers.set("authorization", `Bearer ${token}`);
+      const cacheHeaders = [...headers.entries()].filter(
+        ([name]) => name !== "authorization" && name !== "user-agent",
       );
-    }
-    if (
-      operation.method === "GET" &&
-      response.ok &&
-      policy.cacheable &&
-      policy.expiresAt !== null
-    )
-      this.cache.set(cacheKey, {
-        expiresAt: policy.expiresAt,
-        response: result,
-        byteLength,
-      });
-    return result;
+      const credentialContext = token
+        ? Array.from(
+            new Uint8Array(
+              await crypto.subtle.digest(
+                "SHA-256",
+                new TextEncoder().encode(token),
+              ),
+            ),
+            (byte) => byte.toString(16).padStart(2, "0"),
+          ).join("")
+        : "public";
+      const cacheKey = `${operation.method}:${url.href}:${credentialContext}:${JSON.stringify(cacheHeaders)}`;
+      const servedAt = this.now();
+      const cached = this.cache.get(cacheKey);
+      if (cached && cached.expiresAt > servedAt) {
+        const result: EsiResponse = {
+          ...cached.response,
+          cached: true,
+          freshness: {
+            ...cached.response.freshness,
+            servedAt: new Date(servedAt).toISOString(),
+          },
+        };
+        this.responseSizes.set(result, cached.byteLength);
+        return result;
+      }
+
+      let response: Response;
+      try {
+        response = await withSpan(
+          "esi.http",
+          {
+            "http.request.method": operation.method,
+            "esi.operation": operation.operationId,
+          },
+          () =>
+            (this.options.fetchImplementation ?? fetch)(url, {
+              method: operation.method,
+              headers,
+              ...(body === undefined ? {} : { body }),
+            }),
+        );
+      } catch (error) {
+        throw new EsiRequestError(
+          `ESI network request failed: ${error instanceof Error ? error.message : String(error)}`,
+          undefined,
+          undefined,
+          { code: "NETWORK_ERROR", retryable: true },
+        );
+      }
+      const contentLength = Number(response.headers.get("content-length") ?? 0);
+      const limit = this.options.maxResponseBytes ?? 5_000_000;
+      if (Number.isFinite(contentLength) && contentLength > limit)
+        throw new EsiRequestError(
+          `ESI response exceeds the ${limit} byte safety limit`,
+          response.status,
+          undefined,
+          { code: "RESPONSE_LIMIT", retryable: false },
+        );
+
+      const raw =
+        operation.method === "HEAD" ||
+        response.status === 204 ||
+        response.status === 304
+          ? ""
+          : await response.text();
+      const byteLength = new TextEncoder().encode(raw).byteLength;
+      if (byteLength > limit)
+        throw new EsiRequestError(
+          `ESI response exceeds the ${limit} byte safety limit`,
+          response.status,
+          undefined,
+          { code: "RESPONSE_LIMIT", retryable: false },
+        );
+      let data: JsonValue | string | null = null;
+      if (raw) {
+        try {
+          data = JSON.parse(raw) as JsonValue;
+        } catch {
+          data = raw;
+        }
+      }
+
+      const fetchedAt = this.now();
+      const responseHeaders = selectedHeaders(response.headers);
+      const policy = cacheExpiry(response.headers, operation, fetchedAt);
+      const modifiedAt = parseHttpDate(response.headers.get("last-modified"));
+      const result: EsiResponse = {
+        operationId: operation.operationId,
+        status: response.status,
+        url: url.href,
+        cached: false,
+        headers: responseHeaders,
+        data,
+        freshness: {
+          fetchedAt: new Date(fetchedAt).toISOString(),
+          servedAt: new Date(fetchedAt).toISOString(),
+          expiresAt:
+            policy.expiresAt === null
+              ? null
+              : new Date(policy.expiresAt).toISOString(),
+          sourceLastModified:
+            modifiedAt === null ? null : new Date(modifiedAt).toISOString(),
+        },
+        pagination: this.paginationFor(operation, input, responseHeaders),
+      };
+      this.responseSizes.set(result, byteLength);
+      if (!response.ok && response.status !== 304) {
+        const code = codeForStatus(response.status);
+        throw new EsiRequestError(
+          `ESI ${operation.operationId}${characterId === undefined ? "" : ` for character ${characterId}`} failed with HTTP ${response.status}`,
+          response.status,
+          response.status === 401 || response.status === 403
+            ? {
+                ...(characterId === undefined ? {} : { characterId }),
+                authenticatedCharacterId: token
+                  ? (characterIdFromToken(token) ?? null)
+                  : null,
+                requiredScopes: operation.requiredScopes,
+              }
+            : (data ?? undefined),
+          {
+            code,
+            retryable: retryableForCode(code),
+            retryAfterSeconds: parseRetryAfter(
+              response.headers.get("retry-after"),
+              fetchedAt,
+            ),
+          },
+        );
+      }
+      if (
+        operation.method === "GET" &&
+        response.ok &&
+        policy.cacheable &&
+        policy.expiresAt !== null
+      )
+        this.cache.set(cacheKey, {
+          expiresAt: policy.expiresAt,
+          response: result,
+          byteLength,
+        });
+      return result;
+    });
   }
 
   private now(): number {

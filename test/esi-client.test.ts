@@ -13,6 +13,46 @@ function scopedJwt(characterId = 42): string {
 }
 
 describe("EsiClient", () => {
+  it("selects an acting character without forwarding undeclared ESI parameters", async () => {
+    const document = fixtureDocument();
+    document.paths["/protected-status"] = {
+      get: {
+        operationId: "GetProtectedStatus",
+        security: [{ OAuth2: ["esi-assets.read_assets.v1"] }],
+      },
+    };
+    const tokens = {
+      getAccessToken: vi.fn(() => Promise.resolve(scopedJwt(42))),
+    };
+    const network = vi.fn<typeof fetch>(() =>
+      Promise.resolve(Response.json({ ok: true })),
+    );
+    const client = new EsiClient(new OperationCatalog(document), tokens, {
+      fetchImplementation: network,
+    });
+    await client.call({
+      operationId: "GetProtectedStatus",
+      actingCharacterId: 42,
+    });
+    expect(tokens.getAccessToken).toHaveBeenCalledWith(
+      ["esi-assets.read_assets.v1"],
+      42,
+    );
+    const requestedUrl = network.mock.calls[0]?.[0];
+    if (!(requestedUrl instanceof URL)) throw new Error("Expected a URL");
+    expect(requestedUrl.href).toBe("https://esi.evetech.net/protected-status");
+    await expect(
+      client.call({
+        operationId: "GetCharacterAssets",
+        path: { character_id: 42 },
+        actingCharacterId: 43,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      client.call({ operationId: "GetProtectedStatus", actingCharacterId: 0 }),
+    ).rejects.toThrow();
+    expect(network).toHaveBeenCalledTimes(1);
+  });
   it("rejects mismatched character tokens and cross-character preflight reuse before any ESI request", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     const client = new EsiClient(

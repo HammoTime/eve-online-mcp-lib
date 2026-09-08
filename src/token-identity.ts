@@ -37,7 +37,7 @@ export function createTokenVerifier(
     try {
       if (!keys) {
         const response = await fetchImplementation(SSO_METADATA_URL, {
-          redirect: "error",
+          redirect: "manual",
         });
         if (!response.ok) throw new Error("SSO discovery failed");
         const metadata = (await response.json()) as { jwks_uri?: string };

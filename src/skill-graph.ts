@@ -1,3 +1,4 @@
+import { withSpanSync } from "./telemetry.js";
 import { ROMAN_LEVELS, SkillCatalog, type Requirement } from "./skill-data.js";
 
 export interface TrainingNode extends Requirement {
@@ -14,72 +15,74 @@ export function buildSkillGraph(
   targets: Requirement[],
   baseline: ReadonlyMap<number, number> = new Map(),
 ) {
-  const nodes = new Map<string, TrainingNode>();
-  const pending = [...targets].reverse();
-  while (pending.length) {
-    const target = pending.pop();
-    if (!target) break;
-    if ((baseline.get(target.skillId) ?? 0) >= target.level) continue;
-    const key = nodeKey(target.skillId, target.level);
-    if (nodes.has(key)) continue;
-    const skill = catalog.skill(target.skillId);
-    const dependencies = [
-      ...skill.requirements,
-      ...(target.level > 1
-        ? [{ skillId: target.skillId, level: target.level - 1 }]
-        : []),
-    ].filter((req) => (baseline.get(req.skillId) ?? 0) < req.level);
-    const prerequisites = [
-      ...new Set(dependencies.map((req) => nodeKey(req.skillId, req.level))),
-    ];
-    nodes.set(key, { ...target, key, name: skill.name, prerequisites });
-    if (nodes.size > 10_000)
-      throw new Error("Skill graph exceeds 10,000 nodes");
-    pending.push(...dependencies.reverse());
-  }
-  const incoming = new Map<string, number>();
-  const successors = new Map<string, string[]>();
-  for (const node of nodes.values()) {
-    incoming.set(node.key, node.prerequisites.length);
-    for (const parent of node.prerequisites) {
-      const children = successors.get(parent) ?? [];
-      children.push(node.key);
-      successors.set(parent, children);
+  return withSpanSync("eve.buildSkillGraph", () => {
+    const nodes = new Map<string, TrainingNode>();
+    const pending = [...targets].reverse();
+    while (pending.length) {
+      const target = pending.pop();
+      if (!target) break;
+      if ((baseline.get(target.skillId) ?? 0) >= target.level) continue;
+      const key = nodeKey(target.skillId, target.level);
+      if (nodes.has(key)) continue;
+      const skill = catalog.skill(target.skillId);
+      const dependencies = [
+        ...skill.requirements,
+        ...(target.level > 1
+          ? [{ skillId: target.skillId, level: target.level - 1 }]
+          : []),
+      ].filter((req) => (baseline.get(req.skillId) ?? 0) < req.level);
+      const prerequisites = [
+        ...new Set(dependencies.map((req) => nodeKey(req.skillId, req.level))),
+      ];
+      nodes.set(key, { ...target, key, name: skill.name, prerequisites });
+      if (nodes.size > 10_000)
+        throw new Error("Skill graph exceeds 10,000 nodes");
+      pending.push(...dependencies.reverse());
     }
-  }
-  // Stable FIFO order derives from target order and CCP's fixed prerequisite slot order.
-  const ready = [...nodes.values()]
-    .filter((node) => !node.prerequisites.length)
-    .map((node) => node.key);
-  const ordered: TrainingNode[] = [];
-  for (const key of ready) {
-    if (!key) continue;
-    const node = nodes.get(key);
-    if (!node) throw new Error("Invalid skill graph node");
-    ordered.push(node);
-    for (const child of successors.get(key) ?? []) {
-      const count = (incoming.get(child) ?? 0) - 1;
-      incoming.set(child, count);
-      if (!count) ready.push(child);
+    const incoming = new Map<string, number>();
+    const successors = new Map<string, string[]>();
+    for (const node of nodes.values()) {
+      incoming.set(node.key, node.prerequisites.length);
+      for (const parent of node.prerequisites) {
+        const children = successors.get(parent) ?? [];
+        children.push(node.key);
+        successors.set(parent, children);
+      }
     }
-  }
-  if (ordered.length !== nodes.size)
-    throw new Error(
-      `Skill prerequisite cycle: ${[...incoming]
-        .filter(([, degree]) => degree > 0)
-        .slice(0, 20)
-        .map(([key]) => key)
-        .join(", ")}`,
-    );
-  replayTraining(catalog, ordered, baseline);
-  return {
-    nodes: ordered,
-    edges: ordered.flatMap((node) =>
-      node.prerequisites.map((from) => ({ from, to: node.key })),
-    ),
-    algorithm: "ancestor closure + Kahn topological sort",
-    complexity: "O(V + E) time and memory",
-  };
+    // Stable FIFO order derives from target order and CCP's fixed prerequisite slot order.
+    const ready = [...nodes.values()]
+      .filter((node) => !node.prerequisites.length)
+      .map((node) => node.key);
+    const ordered: TrainingNode[] = [];
+    for (const key of ready) {
+      if (!key) continue;
+      const node = nodes.get(key);
+      if (!node) throw new Error("Invalid skill graph node");
+      ordered.push(node);
+      for (const child of successors.get(key) ?? []) {
+        const count = (incoming.get(child) ?? 0) - 1;
+        incoming.set(child, count);
+        if (!count) ready.push(child);
+      }
+    }
+    if (ordered.length !== nodes.size)
+      throw new Error(
+        `Skill prerequisite cycle: ${[...incoming]
+          .filter(([, degree]) => degree > 0)
+          .slice(0, 20)
+          .map(([key]) => key)
+          .join(", ")}`,
+      );
+    replayTraining(catalog, ordered, baseline);
+    return {
+      nodes: ordered,
+      edges: ordered.flatMap((node) =>
+        node.prerequisites.map((from) => ({ from, to: node.key })),
+      ),
+      algorithm: "ancestor closure + Kahn topological sort",
+      complexity: "O(V + E) time and memory",
+    };
+  });
 }
 
 /** Separate validation pass against the source requirements, not the generated edges. */

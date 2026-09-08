@@ -1,3 +1,4 @@
+import { withSpan } from "./telemetry.js";
 import { EsiRequestError, type EsiClient } from "./esi-client.js";
 import type { JsonValue } from "./types.js";
 import { sourceMetadata } from "./workflow-common.js";
@@ -85,62 +86,68 @@ export async function resolveEveEntities(
   client: EsiClient,
   input: EntityResolutionInput,
 ): Promise<Record<string, unknown>> {
-  if ("names" in input) {
-    const response = await client.call({
-      operationId: "PostUniverseIds",
-      body: uniqueNames(input.names),
-    });
-    if (!isRecord(response.data))
-      throw invalidResponse("ESI name resolution did not return an object");
-    const candidates: Candidate[] = [];
-    for (const [category, values] of Object.entries(response.data)) {
-      if (!Array.isArray(values))
-        throw invalidResponse(
-          `ESI name resolution category ${category} was not an array`,
+  return withSpan("eve.resolveEveEntities", {}, async () => {
+    if ("names" in input) {
+      const response = await client.call({
+        operationId: "PostUniverseIds",
+        body: uniqueNames(input.names),
+      });
+      if (!isRecord(response.data))
+        throw invalidResponse("ESI name resolution did not return an object");
+      const candidates: Candidate[] = [];
+      for (const [category, values] of Object.entries(response.data)) {
+        if (!Array.isArray(values))
+          throw invalidResponse(
+            `ESI name resolution category ${category} was not an array`,
+          );
+        candidates.push(
+          ...values.map((value) => candidateFrom(value, category)),
         );
-      candidates.push(...values.map((value) => candidateFrom(value, category)));
+      }
+      return {
+        matchMode: "exact",
+        results: input.names.map((name) => {
+          const matches = candidates.filter(
+            (candidate) =>
+              candidate.name.toLocaleLowerCase("en-US") ===
+              name.toLocaleLowerCase("en-US"),
+          );
+          return {
+            input: name,
+            status: statusFor(matches),
+            candidates: matches,
+          };
+        }),
+        source: sourceMetadata(response),
+      };
     }
+
+    const response = await client.call({
+      operationId: "PostUniverseNames",
+      body: [...new Set(input.ids)],
+    });
+    if (!Array.isArray(response.data))
+      throw invalidResponse("ESI ID resolution did not return an array");
+    const candidates = response.data.map((value) => {
+      if (!isRecord(value) || typeof value.category !== "string")
+        throw invalidResponse(
+          "ESI ID resolution returned a malformed candidate",
+        );
+      return candidateFrom(value, value.category);
+    });
     return {
       matchMode: "exact",
-      results: input.names.map((name) => {
-        const matches = candidates.filter(
-          (candidate) =>
-            candidate.name.toLocaleLowerCase("en-US") ===
-            name.toLocaleLowerCase("en-US"),
-        );
+      results: input.ids.map((id) => {
+        const matches = candidates.filter((candidate) => candidate.id === id);
         return {
-          input: name,
+          input: id,
           status: statusFor(matches),
           candidates: matches,
         };
       }),
       source: sourceMetadata(response),
+      caveat:
+        "Depending on upstream behavior, one invalid ID can cause ESI to reject the entire batch.",
     };
-  }
-
-  const response = await client.call({
-    operationId: "PostUniverseNames",
-    body: [...new Set(input.ids)],
   });
-  if (!Array.isArray(response.data))
-    throw invalidResponse("ESI ID resolution did not return an array");
-  const candidates = response.data.map((value) => {
-    if (!isRecord(value) || typeof value.category !== "string")
-      throw invalidResponse("ESI ID resolution returned a malformed candidate");
-    return candidateFrom(value, value.category);
-  });
-  return {
-    matchMode: "exact",
-    results: input.ids.map((id) => {
-      const matches = candidates.filter((candidate) => candidate.id === id);
-      return {
-        input: id,
-        status: statusFor(matches),
-        candidates: matches,
-      };
-    }),
-    source: sourceMetadata(response),
-    caveat:
-      "Depending on upstream behavior, one invalid ID can cause ESI to reject the entire batch.",
-  };
 }

@@ -10,6 +10,14 @@ export interface CharacterAuthentication {
     legacyCredentialPendingMigration: boolean;
     browserAuthorizationAvailable: boolean;
   }>;
-  authorize(characterId: number): ReturnType<CharacterAuthentication["list"]>;
+  authorize(characterId: number): Promise<
+    | Awaited<ReturnType<CharacterAuthentication["list"]>>
+    | {
+        status: "authorization_required";
+        authorizationUrl: string;
+        characterId: number;
+        message: string;
+      }
+  >;
   select(characterId: number): ReturnType<CharacterAuthentication["list"]>;
 }
