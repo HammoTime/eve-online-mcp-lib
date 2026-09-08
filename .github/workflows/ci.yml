@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build development container
+        run: docker build --target development -f .devcontainer/Dockerfile -t eve-online-mcp-lib-dev .
+      - name: Validate library
+        run: >-
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp
+          -v "$PWD:/workspace" -w /workspace eve-online-mcp-lib-dev
+          sh -lc "npm ci && npm run validate"
