@@ -84,6 +84,7 @@ export function createEveServer(
     authentication?: CharacterAuthentication;
     staticData: StaticDataSource;
     hostedAuthorizationUrl?: string;
+    protocolVersionHint?: string;
   },
 ): McpServer {
   const { authentication } = options;
@@ -111,6 +112,7 @@ export function createEveServer(
   const server = new ObservedMcpServer(options.identity, {
     instructions: SERVER_INSTRUCTIONS,
   });
+  server.protocolVersionHint = options.protocolVersionHint;
   server.knownOperation = (name) => {
     try {
       catalog.get(name);
