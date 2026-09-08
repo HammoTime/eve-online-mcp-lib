@@ -1,4 +1,5 @@
-import { withSpan } from "./telemetry.js";
+import { attributes, diagnostic, withSpan, withSpanSync } from "./telemetry.js";
+import { projectInput } from "./diagnostic-policy.js";
 import {
   EsiRequestError,
   publicEsiError,
@@ -94,151 +95,187 @@ export async function getMarketSnapshot(
   },
   options: { maxAggregateBytes?: number } = {},
 ): Promise<Record<string, unknown>> {
-  return withSpan("eve.getMarketSnapshot", {}, async () => {
-    const maxAggregateBytes = options.maxAggregateBytes ?? 5_000_000;
-    const sources: Record<string, unknown>[] = [];
-    const warnings = [MARKET_CAVEAT];
-    const orders = new Map<number, MarketOrder>();
-    let page = 1;
-    let aggregateBytes = 0;
-    let observedPageCount: number | null = null;
-    let stopReason = "allPagesFetched";
-    let inconsistent = false;
+  return withSpan(
+    "eve.getMarketSnapshot",
+    projectInput(input).attributes,
+    async () => {
+      const maxAggregateBytes = options.maxAggregateBytes ?? 5_000_000;
+      attributes({
+        "eve.limit.aggregate_bytes": maxAggregateBytes,
+        "eve.effective.maxPages": input.maxPages,
+        "eve.input.location_filter_present": input.locationId !== undefined,
+      });
+      const sources: Record<string, unknown>[] = [];
+      const warnings = [MARKET_CAVEAT];
+      const orders = new Map<number, MarketOrder>();
+      let page = 1;
+      let aggregateBytes = 0;
+      let observedPageCount: number | null = null;
+      let stopReason = "allPagesFetched";
+      let inconsistent = false;
 
-    for (;;) {
-      let response;
-      try {
-        response = await client.call({
-          operationId: "GetMarketsRegionIdOrders",
-          path: { region_id: input.regionId },
-          query: {
-            order_type: "all",
-            type_id: input.typeId,
-            page,
-          },
+      for (;;) {
+        diagnostic("eve.market.page.begin", {
+          "eve.pagination.page": page,
+          "eve.market.accepted_pages": sources.length,
+          "eve.market.aggregate_bytes": aggregateBytes,
         });
-      } catch (error) {
-        if (page === 1) throw error;
-        stopReason = "pageError";
-        warnings.push(
-          `Page ${page} failed: ${JSON.stringify(publicEsiError(error))}`,
-        );
-        break;
-      }
-
-      const pageBytes = client.responseByteLength(response);
-      if (aggregateBytes + pageBytes > maxAggregateBytes) {
-        if (page === 1) throw responseLimit(maxAggregateBytes);
-        stopReason = "byteLimit";
-        warnings.push(
-          `Page ${page} was not accepted because of the byte limit.`,
-        );
-        break;
-      }
-
-      let pageOrders: MarketOrder[];
-      try {
-        pageOrders = parsePage(response.data, page);
-      } catch (error) {
-        if (page === 1) throw error;
-        stopReason = "invalidPage";
-        warnings.push(
-          `Page ${page} was not accepted: ${JSON.stringify(publicEsiError(error))}`,
-        );
-        break;
-      }
-
-      aggregateBytes += pageBytes;
-      sources.push({ page, ...sourceMetadata(response) });
-      for (const order of pageOrders) {
-        const existing = orders.get(order.orderId);
-        if (!existing) {
-          orders.set(order.orderId, order);
-        } else if (
-          JSON.stringify(existing.original) !== JSON.stringify(order.original)
-        ) {
-          inconsistent = true;
+        let response;
+        try {
+          response = await client.call({
+            operationId: "GetMarketsRegionIdOrders",
+            path: { region_id: input.regionId },
+            query: {
+              order_type: "all",
+              type_id: input.typeId,
+              page,
+            },
+          });
+        } catch (error) {
+          if (page === 1) throw error;
+          stopReason = "pageError";
           warnings.push(
-            `Conflicting duplicate order_id ${order.orderId} on page ${page}; the first occurrence was retained.`,
+            `Page ${page} failed: ${JSON.stringify(publicEsiError(error))}`,
           );
-        }
-      }
-
-      const reportedPages = response.pagination.totalPages;
-      if (observedPageCount === null) {
-        observedPageCount = reportedPages;
-        if (reportedPages === null) {
-          stopReason = "unknownPageCount";
           break;
         }
-      } else if (
-        reportedPages === null ||
-        reportedPages !== observedPageCount
-      ) {
-        inconsistent = true;
-        stopReason = "pageCountChanged";
-        warnings.push(
-          `Reported page count changed from ${observedPageCount} to ${reportedPages ?? "unknown"}.`,
-        );
-        break;
-      }
-      if (observedPageCount !== null && page >= observedPageCount) break;
-      if (sources.length >= input.maxPages) {
-        stopReason = "maxPages";
-        break;
-      }
-      page += 1;
-    }
 
-    const filtered = [...orders.values()].filter(
-      (order) =>
-        order.typeId === input.typeId &&
-        (input.locationId === undefined ||
-          order.locationId === input.locationId),
-    );
-    const buyOrders = filtered.filter((order) => order.isBuyOrder);
-    const sellOrders = filtered.filter((order) => !order.isBuyOrder);
-    const highestObservedBuy =
-      buyOrders.length === 0
-        ? null
-        : Math.max(...buyOrders.map((order) => order.price));
-    const lowestObservedSell =
-      sellOrders.length === 0
-        ? null
-        : Math.min(...sellOrders.map((order) => order.price));
-    if (stopReason === "allPagesFetched" && inconsistent)
-      stopReason = "inconsistentData";
-    const complete = stopReason === "allPagesFetched" && !inconsistent;
+        const pageBytes = client.responseByteLength(response);
+        if (aggregateBytes + pageBytes > maxAggregateBytes) {
+          if (page === 1) throw responseLimit(maxAggregateBytes);
+          stopReason = "byteLimit";
+          warnings.push(
+            `Page ${page} was not accepted because of the byte limit.`,
+          );
+          break;
+        }
 
-    return {
-      regionId: input.regionId,
-      typeId: input.typeId,
-      locationId: input.locationId ?? null,
-      scope: "public regional market orders only",
-      pagesFetched: sources.length,
-      observedPageCount,
-      complete,
-      stopReason,
-      warnings,
-      sources,
-      aggregates: {
-        buyOrderCount: buyOrders.length,
-        sellOrderCount: sellOrders.length,
-        buyVolumeRemaining: buyOrders.reduce(
-          (total, order) => total + order.volumeRemain,
-          0,
-        ),
-        sellVolumeRemaining: sellOrders.reduce(
-          (total, order) => total + order.volumeRemain,
-          0,
-        ),
-        highestObservedBuy,
-        lowestObservedSell,
-        observedSpread:
-          highestObservedBuy === null || lowestObservedSell === null
-            ? null
-            : lowestObservedSell - highestObservedBuy,
-      },
-    };
-  });
+        let pageOrders: MarketOrder[];
+        try {
+          pageOrders = withSpanSync(
+            "eve.market.parse_page",
+            () => parsePage(response.data, page),
+            { "eve.pagination.page": page, "eve.input.bytes": pageBytes },
+          );
+        } catch (error) {
+          if (page === 1) throw error;
+          stopReason = "invalidPage";
+          warnings.push(
+            `Page ${page} was not accepted: ${JSON.stringify(publicEsiError(error))}`,
+          );
+          break;
+        }
+
+        aggregateBytes += pageBytes;
+        sources.push({ page, ...sourceMetadata(response) });
+        for (const order of pageOrders) {
+          const existing = orders.get(order.orderId);
+          if (!existing) {
+            orders.set(order.orderId, order);
+          } else if (
+            JSON.stringify(existing.original) !== JSON.stringify(order.original)
+          ) {
+            inconsistent = true;
+            warnings.push(
+              `Conflicting duplicate order_id ${order.orderId} on page ${page}; the first occurrence was retained.`,
+            );
+          }
+        }
+
+        const reportedPages = response.pagination.totalPages;
+        diagnostic("eve.market.page.accepted", {
+          "eve.pagination.page": page,
+          "eve.market.page_order_count": pageOrders.length,
+          "eve.market.distinct_order_count": orders.size,
+          "eve.market.inconsistent": inconsistent,
+          "eve.market.aggregate_bytes": aggregateBytes,
+          "eve.pagination.reported_pages": reportedPages ?? 0,
+          "eve.pagination.count_known": reportedPages !== null,
+        });
+        if (observedPageCount === null) {
+          observedPageCount = reportedPages;
+          if (reportedPages === null) {
+            stopReason = "unknownPageCount";
+            break;
+          }
+        } else if (
+          reportedPages === null ||
+          reportedPages !== observedPageCount
+        ) {
+          inconsistent = true;
+          stopReason = "pageCountChanged";
+          warnings.push(
+            `Reported page count changed from ${observedPageCount} to ${reportedPages ?? "unknown"}.`,
+          );
+          break;
+        }
+        if (observedPageCount !== null && page >= observedPageCount) break;
+        if (sources.length >= input.maxPages) {
+          stopReason = "maxPages";
+          break;
+        }
+        page += 1;
+      }
+
+      const filtered = [...orders.values()].filter(
+        (order) =>
+          order.typeId === input.typeId &&
+          (input.locationId === undefined ||
+            order.locationId === input.locationId),
+      );
+      const buyOrders = filtered.filter((order) => order.isBuyOrder);
+      const sellOrders = filtered.filter((order) => !order.isBuyOrder);
+      const highestObservedBuy =
+        buyOrders.length === 0
+          ? null
+          : Math.max(...buyOrders.map((order) => order.price));
+      const lowestObservedSell =
+        sellOrders.length === 0
+          ? null
+          : Math.min(...sellOrders.map((order) => order.price));
+      if (stopReason === "allPagesFetched" && inconsistent)
+        stopReason = "inconsistentData";
+      const complete = stopReason === "allPagesFetched" && !inconsistent;
+      attributes({
+        "eve.output.complete": complete,
+        "eve.output.stopReason": stopReason,
+        "eve.output.pagesFetched": sources.length,
+        "eve.output.order_count": filtered.length,
+        "eve.output.buyOrderCount": buyOrders.length,
+        "eve.output.sellOrderCount": sellOrders.length,
+        "eve.output.aggregate_bytes": aggregateBytes,
+      });
+
+      return {
+        regionId: input.regionId,
+        typeId: input.typeId,
+        locationId: input.locationId ?? null,
+        scope: "public regional market orders only",
+        pagesFetched: sources.length,
+        observedPageCount,
+        complete,
+        stopReason,
+        warnings,
+        sources,
+        aggregates: {
+          buyOrderCount: buyOrders.length,
+          sellOrderCount: sellOrders.length,
+          buyVolumeRemaining: buyOrders.reduce(
+            (total, order) => total + order.volumeRemain,
+            0,
+          ),
+          sellVolumeRemaining: sellOrders.reduce(
+            (total, order) => total + order.volumeRemain,
+            0,
+          ),
+          highestObservedBuy,
+          lowestObservedSell,
+          observedSpread:
+            highestObservedBuy === null || lowestObservedSell === null
+              ? null
+              : lowestObservedSell - highestObservedBuy,
+        },
+      };
+    },
+  );
 }

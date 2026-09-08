@@ -1,4 +1,4 @@
-import { withSpan } from "./telemetry.js";
+import { attributes, diagnostic, withSpan } from "./telemetry.js";
 import {
   EsiRequestError,
   publicEsiError,
@@ -41,114 +41,136 @@ export async function getCharacterContext(
   input: { characterId: number; sections: CharacterSection[] },
   options: { maxResultBytes?: number } = {},
 ): Promise<Record<string, unknown>> {
-  return withSpan("eve.getCharacterContext", {}, async () => {
-    const maxResultBytes = options.maxResultBytes ?? 5_000_000;
-    const caveats = input.sections.some(
-      (section) => section === "skills" || section === "skillQueue",
-    )
-      ? [
-          SKILLS_CAVEAT,
-          "Each section is fetched separately; successful retrieval does not guarantee identical observation time or freshness.",
-        ]
-      : [
-          "Each section is fetched separately; successful retrieval does not guarantee identical observation time or freshness.",
-        ];
-    const selected = input.sections.map((section) => ({
-      section,
-      operation: catalog.get(CHARACTER_SECTIONS[section]),
-    }));
-    const requiredScopes = [
-      ...new Set(selected.flatMap(({ operation }) => operation.requiredScopes)),
-    ].sort();
-    let authorization: EsiAuthorization | undefined;
-    let authorizationError: unknown;
-    if (requiredScopes.length > 0) {
-      try {
-        authorization = await client.authorize(
-          requiredScopes,
-          input.characterId,
-        );
-      } catch (error) {
-        authorizationError = error;
+  return withSpan(
+    "eve.getCharacterContext",
+    {
+      "eve.input.sections": input.sections.filter(
+        (s) => s in CHARACTER_SECTIONS,
+      ),
+      "eve.input.section_count": input.sections.length,
+    },
+    async () => {
+      const maxResultBytes = options.maxResultBytes ?? 5_000_000;
+      attributes({ "eve.limit.result_bytes": maxResultBytes });
+      const caveats = input.sections.some(
+        (section) => section === "skills" || section === "skillQueue",
+      )
+        ? [
+            SKILLS_CAVEAT,
+            "Each section is fetched separately; successful retrieval does not guarantee identical observation time or freshness.",
+          ]
+        : [
+            "Each section is fetched separately; successful retrieval does not guarantee identical observation time or freshness.",
+          ];
+      const selected = input.sections.map((section) => ({
+        section,
+        operation: catalog.get(CHARACTER_SECTIONS[section]),
+      }));
+      const requiredScopes = [
+        ...new Set(
+          selected.flatMap(({ operation }) => operation.requiredScopes),
+        ),
+      ].sort();
+      let authorization: EsiAuthorization | undefined;
+      let authorizationError: unknown;
+      if (requiredScopes.length > 0) {
+        try {
+          authorization = await client.authorize(
+            requiredScopes,
+            input.characterId,
+          );
+        } catch (error) {
+          authorizationError = error;
+        }
       }
-    }
 
-    const sections: Record<string, unknown> = {};
-    let successes = 0;
-    for (const { section, operation } of selected) {
-      if (operation.requiredScopes.length > 0 && authorizationError) {
-        sections[section] = {
-          status: "error",
-          error: publicEsiError(authorizationError),
-        };
-        continue;
+      const sections: Record<string, unknown> = {};
+      let successes = 0;
+      for (const { section, operation } of selected) {
+        diagnostic("eve.character.section.begin", {
+          "eve.character.section": section,
+          "eve.auth.required": operation.requiredScopes.length > 0,
+          "eve.auth.failed": !!authorizationError,
+        });
+        if (operation.requiredScopes.length > 0 && authorizationError) {
+          sections[section] = {
+            status: "error",
+            error: publicEsiError(authorizationError),
+          };
+          continue;
+        }
+        try {
+          const response = await withSpan(
+            "eve.character.fetch_section",
+            { "eve.character.section": section },
+            () =>
+              client.call(
+                {
+                  operationId: operation.operationId,
+                  path: { character_id: input.characterId },
+                },
+                operation.requiredScopes.length > 0 ? authorization : undefined,
+              ),
+          );
+          const sectionResult = {
+            status: "ok",
+            data: response.data,
+            source: sourceMetadata(response),
+          };
+          const candidate = {
+            characterId: input.characterId,
+            requestedSections: input.sections,
+            status: "complete",
+            sections: { ...sections, [section]: sectionResult },
+            atomic: false,
+            caveats,
+          };
+          if (serializedBytes(candidate) > maxResultBytes) {
+            sections[section] = {
+              status: "error",
+              error: publicEsiError(responseLimitError(maxResultBytes)),
+            };
+          } else {
+            sections[section] = sectionResult;
+            successes += 1;
+          }
+        } catch (error) {
+          sections[section] = { status: "error", error: publicEsiError(error) };
+        }
       }
-      try {
-        const response = await client.call(
-          {
-            operationId: operation.operationId,
-            path: { character_id: input.characterId },
-          },
-          operation.requiredScopes.length > 0 ? authorization : undefined,
-        );
-        const sectionResult = {
-          status: "ok",
-          data: response.data,
-          source: sourceMetadata(response),
-        };
-        const candidate = {
-          characterId: input.characterId,
-          requestedSections: input.sections,
-          status: "complete",
-          sections: { ...sections, [section]: sectionResult },
-          atomic: false,
-          caveats,
-        };
-        if (serializedBytes(candidate) > maxResultBytes) {
+
+      const buildResult = () => ({
+        characterId: input.characterId,
+        requestedSections: input.sections,
+        status:
+          successes === selected.length
+            ? "complete"
+            : successes === 0
+              ? "failed"
+              : "partial",
+        sections,
+        atomic: false,
+        caveats,
+      });
+      let result = buildResult();
+      for (const section of [...input.sections].reverse()) {
+        if (serializedBytes(result) <= maxResultBytes) break;
+        const sectionResult = sections[section];
+        if (
+          typeof sectionResult === "object" &&
+          sectionResult !== null &&
+          "status" in sectionResult &&
+          sectionResult.status === "ok"
+        ) {
           sections[section] = {
             status: "error",
             error: publicEsiError(responseLimitError(maxResultBytes)),
           };
-        } else {
-          sections[section] = sectionResult;
-          successes += 1;
+          successes -= 1;
+          result = buildResult();
         }
-      } catch (error) {
-        sections[section] = { status: "error", error: publicEsiError(error) };
       }
-    }
-
-    const buildResult = () => ({
-      characterId: input.characterId,
-      requestedSections: input.sections,
-      status:
-        successes === selected.length
-          ? "complete"
-          : successes === 0
-            ? "failed"
-            : "partial",
-      sections,
-      atomic: false,
-      caveats,
-    });
-    let result = buildResult();
-    for (const section of [...input.sections].reverse()) {
-      if (serializedBytes(result) <= maxResultBytes) break;
-      const sectionResult = sections[section];
-      if (
-        typeof sectionResult === "object" &&
-        sectionResult !== null &&
-        "status" in sectionResult &&
-        sectionResult.status === "ok"
-      ) {
-        sections[section] = {
-          status: "error",
-          error: publicEsiError(responseLimitError(maxResultBytes)),
-        };
-        successes -= 1;
-        result = buildResult();
-      }
-    }
-    return result;
-  });
+      return result;
+    },
+  );
 }

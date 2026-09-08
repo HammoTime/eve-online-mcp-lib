@@ -11,5 +11,12 @@
     "skipLibCheck": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src", "scripts", "test", "vitest.config.ts", "eslint.config.js"]
+  "include": [
+    "src",
+    "adapters",
+    "scripts",
+    "test",
+    "vitest.config.ts",
+    "eslint.config.js"
+  ]
 }

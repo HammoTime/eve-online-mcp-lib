@@ -1,4 +1,5 @@
-import { withSpanSync } from "./telemetry.js";
+import { DiagnosticError } from "./diagnostic-error.js";
+import { attributes, withSpanSync } from "./telemetry.js";
 import { ROMAN_LEVELS, SkillCatalog, type Requirement } from "./skill-data.js";
 
 export interface TrainingNode extends Requirement {
@@ -16,6 +17,11 @@ export function buildSkillGraph(
   baseline: ReadonlyMap<number, number> = new Map(),
 ) {
   return withSpanSync("eve.buildSkillGraph", () => {
+    attributes({
+      "eve.input.target_count": targets.length,
+      "eve.input.baseline_count": baseline.size,
+      "eve.limit.graph_nodes": 10_000,
+    });
     const nodes = new Map<string, TrainingNode>();
     const pending = [...targets].reverse();
     while (pending.length) {
@@ -36,7 +42,10 @@ export function buildSkillGraph(
       ];
       nodes.set(key, { ...target, key, name: skill.name, prerequisites });
       if (nodes.size > 10_000)
-        throw new Error("Skill graph exceeds 10,000 nodes");
+        throw new DiagnosticError(
+          "SKILL_GRAPH_LIMIT",
+          "Skill graph exceeds 10,000 nodes",
+        );
       pending.push(...dependencies.reverse());
     }
     const incoming = new Map<string, number>();
@@ -57,7 +66,11 @@ export function buildSkillGraph(
     for (const key of ready) {
       if (!key) continue;
       const node = nodes.get(key);
-      if (!node) throw new Error("Invalid skill graph node");
+      if (!node)
+        throw new DiagnosticError(
+          "SKILL_GRAPH_NODE",
+          "Invalid skill graph node",
+        );
       ordered.push(node);
       for (const child of successors.get(key) ?? []) {
         const count = (incoming.get(child) ?? 0) - 1;
@@ -66,7 +79,8 @@ export function buildSkillGraph(
       }
     }
     if (ordered.length !== nodes.size)
-      throw new Error(
+      throw new DiagnosticError(
+        "SKILL_GRAPH_CYCLE",
         `Skill prerequisite cycle: ${[...incoming]
           .filter(([, degree]) => degree > 0)
           .slice(0, 20)
@@ -74,6 +88,13 @@ export function buildSkillGraph(
           .join(", ")}`,
       );
     replayTraining(catalog, ordered, baseline);
+    attributes({
+      "eve.output.node_count": ordered.length,
+      "eve.output.edge_count": ordered.reduce(
+        (sum, node) => sum + node.prerequisites.length,
+        0,
+      ),
+    });
     return {
       nodes: ordered,
       edges: ordered.flatMap((node) =>
@@ -91,21 +112,29 @@ export function replayTraining(
   nodes: Requirement[],
   baseline: ReadonlyMap<number, number>,
 ) {
-  const levels = new Map(baseline);
-  for (const node of nodes) {
-    if ((levels.get(node.skillId) ?? 0) >= node.level) continue;
-    if ((levels.get(node.skillId) ?? 0) !== node.level - 1)
-      throw new Error(
-        `Missing preceding level for ${node.skillId}:${node.level}`,
-      );
-    for (const req of catalog.skill(node.skillId).requirements)
-      if ((levels.get(req.skillId) ?? 0) < req.level)
-        throw new Error(
-          `Missing prerequisite ${req.skillId}:${req.level} for ${node.skillId}:${node.level}`,
+  return withSpanSync("eve.replayTraining", () => {
+    attributes({
+      "eve.input.node_count": nodes.length,
+      "eve.input.baseline_count": baseline.size,
+    });
+    const levels = new Map(baseline);
+    for (const node of nodes) {
+      if ((levels.get(node.skillId) ?? 0) >= node.level) continue;
+      if ((levels.get(node.skillId) ?? 0) !== node.level - 1)
+        throw new DiagnosticError(
+          "TRAINING_LEVEL_GAP",
+          `Missing preceding level for ${node.skillId}:${node.level}`,
         );
-    levels.set(node.skillId, node.level);
-  }
-  return levels;
+      for (const req of catalog.skill(node.skillId).requirements)
+        if ((levels.get(req.skillId) ?? 0) < req.level)
+          throw new DiagnosticError(
+            "TRAINING_PREREQUISITE_MISSING",
+            `Missing prerequisite ${req.skillId}:${req.level} for ${node.skillId}:${node.level}`,
+          );
+      levels.set(node.skillId, node.level);
+    }
+    return levels;
+  });
 }
 
 export function trainingText(nodes: Requirement[], catalog: SkillCatalog) {

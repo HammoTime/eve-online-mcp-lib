@@ -1,4 +1,4 @@
-import { withSpan } from "./telemetry.js";
+import { attributes, diagnostic, withSpan } from "./telemetry.js";
 import * as z from "zod/v4";
 import {
   decodeRequirements,
@@ -64,6 +64,10 @@ export async function parseStaticData(
   metadata: Omit<StaticCatalog, "schemaVersion" | "types">,
 ): Promise<StaticCatalog> {
   return withSpan("eve.parseStaticData", {}, async () => {
+    attributes({
+      "eve.limit.records_per_file": 200_000,
+      "eve.sde.build": metadata.buildNumber,
+    });
     const groups = new Map<number, number>();
     const rawTypes: z.infer<typeof typeSchema>[] = [];
     const dogma = new Map<
@@ -110,6 +114,12 @@ export async function parseStaticData(
         }
       }
     }
+    diagnostic("eve.sde.parsed", {
+      "eve.sde.file_count": seen.size,
+      "eve.sde.group_count": groups.size,
+      "eve.sde.type_count": rawTypes.length,
+      "eve.sde.dogma_count": dogma.size,
+    });
     if (seen.size !== STATIC_DATA_FILES.length)
       throw new Error("SDE archive is missing required files");
     const types = rawTypes
