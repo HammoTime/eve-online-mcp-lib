@@ -31,6 +31,8 @@ import type { CharacterAuthentication } from "./character-authentication.js";
 import { observedStaticData, type StaticDataSource } from "./static-data.js";
 import { SkillPlanner } from "./skill-plan.js";
 import { planTargetSchema, targetListSchema } from "./skill-data.js";
+import { MAP_INSTRUCTIONS, registerCartography } from "./cartography/mcp.js";
+import type { CartographyServices } from "./cartography/service.js";
 
 const jsonRecord = z.record(z.string(), z.json()).optional();
 const positiveSafeInteger = z
@@ -85,6 +87,7 @@ export function createEveServer(
     staticData: StaticDataSource;
     hostedAuthorizationUrl?: string;
     protocolVersionHint?: string;
+    cartography?: CartographyServices;
   },
 ): McpServer {
   const { authentication } = options;
@@ -110,7 +113,9 @@ export function createEveServer(
       : result;
   };
   const server = new ObservedMcpServer(options.identity, {
-    instructions: SERVER_INSTRUCTIONS,
+    instructions: options.cartography
+      ? `${SERVER_INSTRUCTIONS}\n${MAP_INSTRUCTIONS}`
+      : SERVER_INSTRUCTIONS,
   });
   server.protocolVersionHint = options.protocolVersionHint;
   server.knownOperation = (name) => {
@@ -786,5 +791,6 @@ export function createEveServer(
       })),
   );
 
+  if (options.cartography) registerCartography(server, options.cartography);
   return server;
 }

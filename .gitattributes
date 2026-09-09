@@ -1,0 +1,2 @@
+# Keep shared source reproducible in devcontainers on every checkout platform.
+* text=auto eol=lf

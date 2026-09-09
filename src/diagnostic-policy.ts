@@ -14,6 +14,7 @@ export const TOOL_NAMES = new Set([
   "resolve_eve_entities",
   "get_character_context",
   "get_market_snapshot",
+  "render_eve_map",
 ]);
 const PUBLIC_NUMBERS = new Set([
   "regionId",
