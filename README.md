@@ -109,3 +109,15 @@ docker run --rm --user node -v "$PWD:/workspace" -w /workspace eve-online-mcp-li
 Validation includes formatting, strict lint, typechecking, runtime compilation
 without Node globals, coverage tests, a browser-target bundle check, and a build.
 Publish library commits before updating a consumer's Git submodule pointer.
+
+## Cartography extension
+
+Optional `cartography` services in `createEveServer` register `render_eve_map` and
+artifact resource templates. The shared `src/cartography` core is runtime-independent;
+consumers supply public SDE map data, private artifact storage and optionally a PNG
+preview adapter. It is a renderer only: `boundary` and `pointsOfInterest` are required,
+and supplied route sequences are validated without planning, repair or expansion.
+There is no ESI/planner/auth dependency in the renderer or its registration module.
+Absent adapters leave existing consumers unchanged. Never expose stored artifacts
+across users without an owner-scoped adapter; base geography being public does not
+make caller-authored plans public.
