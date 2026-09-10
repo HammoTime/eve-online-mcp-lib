@@ -791,6 +791,11 @@ export function createEveServer(
       })),
   );
 
-  if (options.cartography) registerCartography(server, options.cartography);
+  if (options.cartography)
+    registerCartography(
+      server,
+      options.cartography,
+      options.protocolVersionHint,
+    );
   return server;
 }

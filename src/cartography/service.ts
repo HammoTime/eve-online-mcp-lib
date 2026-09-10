@@ -37,6 +37,9 @@ export interface MapPreview {
   }>;
 }
 export interface CartographyServices {
+  /** Host admission/cancellation. Cleanup runs when the actual render settles,
+   * including errors, not when Streamable HTTP returns its response headers. */
+  beginRender?: (signal: AbortSignal) => () => void;
   data: MapDataSource;
   artifacts: MapArtifactStore;
   preview?: MapPreview;

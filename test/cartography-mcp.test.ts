@@ -54,6 +54,7 @@ async function setup(
     preview?: "ready" | "fail" | "oversize";
     stale?: boolean;
     legacy?: boolean;
+    protocolVersionHint?: string;
   } = {},
 ) {
   const catalog = new MapCatalog(data);
@@ -111,7 +112,7 @@ async function setup(
       }),
     };
   const server = new McpServer({ name: "map-test", version: "1.0.0" });
-  registerCartography(server, services);
+  registerCartography(server, services, options.protocolVersionHint);
   const client = new Client({ name: "map-test-client", version: "1.0.0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await server.connect(b);
@@ -302,6 +303,85 @@ describe("renderer-only map MCP", () => {
     expect(result.content).toEqual(
       expect.arrayContaining([expect.objectContaining({ type: "resource" })]),
     );
+  });
+  it.each(["2024-11-05", "2025-03-26"])(
+    "uses the stateless transport hint %s for embedded SVG delivery",
+    async (protocolVersionHint) => {
+      const { client } = await setup({ protocolVersionHint });
+      const result = await client.callTool({
+        name: "render_eve_map",
+        arguments: request,
+      });
+      expect(result.content).toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: "resource" })]),
+      );
+      expect(result.content).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "resource_link" }),
+        ]),
+      );
+    },
+  );
+  it("does not treat an unrecognized hint as a legacy protocol", async () => {
+    const { client } = await setup({ protocolVersionHint: "unknown" });
+    const result = await client.callTool({
+      name: "render_eve_map",
+      arguments: request,
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "resource_link" }),
+      ]),
+    );
+  });
+  it("holds host admission until the actual render settles", async () => {
+    const { client, services } = await setup();
+    const initialized = await services.data.initialize();
+    let resolve!: (value: typeof initialized) => void;
+    const pending = new Promise<typeof initialized>((ready) => {
+      resolve = ready;
+    });
+    const finish = vi.fn();
+    const begin = vi.fn(() => finish);
+    services.beginRender = begin;
+    vi.mocked(services.data.initialize).mockReturnValue(pending);
+    const call = client.callTool({
+      name: "render_eve_map",
+      arguments: request,
+    });
+    await vi.waitFor(() => {
+      expect(begin).toHaveBeenCalledOnce();
+    });
+    expect(begin).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(finish).not.toHaveBeenCalled();
+    resolve(initialized);
+    await call;
+    expect(finish).toHaveBeenCalledOnce();
+  });
+  it("releases host admission on failure and rejects before loading when admission fails", async () => {
+    const { client, services } = await setup();
+    const finish = vi.fn();
+    services.beginRender = () => finish;
+    vi.mocked(services.data.initialize).mockRejectedValue(
+      new Error("private load failure"),
+    );
+    expect(
+      (await client.callTool({ name: "render_eve_map", arguments: request }))
+        .isError,
+    ).toBe(true);
+    expect(finish).toHaveBeenCalledOnce();
+    vi.mocked(services.data.initialize).mockClear();
+    services.beginRender = () => {
+      throw new Error("private capacity failure");
+    };
+    const result = await client.callTool({
+      name: "render_eve_map",
+      arguments: request,
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private capacity failure");
+    expect(services.data.initialize).not.toHaveBeenCalled();
+    expect(finish).toHaveBeenCalledOnce();
   });
   it("does not capture POI notes, full routes or artifact handles in diagnostics", () => {
     expect(TOOL_NAMES.has("render_eve_map")).toBe(true);

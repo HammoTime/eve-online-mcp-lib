@@ -92,6 +92,7 @@ export const MAP_INSTRUCTIONS =
 export function registerCartography(
   server: McpServer,
   services: CartographyServices,
+  protocolVersionHint?: string,
 ) {
   server.registerTool(
     "render_eve_map",
@@ -113,9 +114,11 @@ export function registerCartography(
         "eve.tool.render_eve_map",
         { "gen_ai.tool.name": "render_eve_map" },
         async () => {
+          let finish: (() => void) | undefined;
           try {
             const signal = ctx.mcpReq.signal;
             signal.throwIfAborted();
+            finish = services.beginRender?.(signal);
             const { catalog, status } = await services.data.initialize();
             signal.throwIfAborted();
             const map = renderMap(catalog, request);
@@ -191,7 +194,8 @@ export function registerCartography(
             ];
             const envelope = ctx.mcpReq.envelope as
               Record<string, unknown> | undefined;
-            let version = envelope?.[PROTOCOL_VERSION_META_KEY];
+            let version =
+              envelope?.[PROTOCOL_VERSION_META_KEY] ?? protocolVersionHint;
             if (typeof version !== "string") {
               // eslint-disable-next-line @typescript-eslint/no-deprecated -- Legacy clients have no per-request envelope.
               version = server.server.getNegotiatedProtocolVersion();
@@ -270,6 +274,8 @@ export function registerCartography(
               structuredContent,
               _meta: diagnosticMetadata(),
             };
+          } finally {
+            finish?.();
           }
         },
       ),
