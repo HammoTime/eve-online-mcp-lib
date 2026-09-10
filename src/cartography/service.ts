@@ -1,10 +1,17 @@
 import type { MapCatalog } from "./catalog.js";
-import type { MapDataStatus, RenderedMap } from "./types.js";
+import type { PreparedMapScene } from "./prepared.js";
+import type { MapDataStatus, MapRequest, RenderedMap } from "./types.js";
 
 export interface MapDataSource {
   initialize: (
     refresh?: boolean,
   ) => Promise<{ catalog: MapCatalog; status: MapDataStatus }>;
+}
+export interface PreparedMapDataSource {
+  prepare: (
+    request: MapRequest,
+    signal?: AbortSignal,
+  ) => Promise<{ scene: PreparedMapScene; status: MapDataStatus }>;
 }
 export interface MapArtifact {
   id: string;
@@ -40,7 +47,7 @@ export interface CartographyServices {
   /** Host admission/cancellation. Cleanup runs when the actual render settles,
    * including errors, not when Streamable HTTP returns its response headers. */
   beginRender?: (signal: AbortSignal) => () => void;
-  data: MapDataSource;
+  data: MapDataSource | PreparedMapDataSource;
   artifacts: MapArtifactStore;
   preview?: MapPreview;
 }

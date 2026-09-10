@@ -1,12 +1,19 @@
 import * as z from "zod/v4";
+import { present } from "./layout.js";
 import {
   MapError,
   mapIdSchema,
-  mapReferenceSchema,
   mapText,
   type MapData,
   type MapSystem,
 } from "./types.js";
+import {
+  mapReferenceQuery,
+  resolveMapReference,
+  type MapReferenceCategory,
+  type MapReferenceQuery,
+  type MapResolutionFact,
+} from "./references.js";
 
 // Capacity limits, not assumptions about today's SDE ID ranges or population.
 export const MAP_DATA_LIMITS = {
@@ -25,24 +32,23 @@ const positionSchema = z.object({
 });
 const position2DSchema = positionSchema.omit({ z: true });
 const namedSchema = z.object({ id: mapIdSchema, name: mapText(100) });
-const mapDataSchema = z.object({
-  schemaVersion: z.literal(1),
+export const mapSystemSchema = namedSchema.extend({
+  regionId: mapIdSchema,
+  constellationId: mapIdSchema,
+  position: positionSchema,
+  position2D: position2DSchema.optional(),
+  securityStatus: z.number(),
+});
+export const mapSourceSchema = z.object({
   buildNumber: mapIdSchema,
   releaseDate: z.iso.datetime(),
   sourceUrl: z.url(),
   fetchedAt: z.iso.datetime(),
-  systems: z
-    .array(
-      namedSchema.extend({
-        regionId: mapIdSchema,
-        constellationId: mapIdSchema,
-        position: positionSchema,
-        position2D: position2DSchema.optional(),
-        securityStatus: z.number(),
-      }),
-    )
-    .min(1)
-    .max(MAP_DATA_LIMITS.systems),
+});
+const mapDataSchema = z.object({
+  schemaVersion: z.literal(1),
+  ...mapSourceSchema.shape,
+  systems: z.array(mapSystemSchema).min(1).max(MAP_DATA_LIMITS.systems),
   regions: z.array(namedSchema).min(1).max(MAP_DATA_LIMITS.regions),
   constellations: z
     .array(namedSchema.extend({ regionId: mapIdSchema }))
@@ -161,18 +167,12 @@ function indexNames<T extends { id: number; name: string }>(items: T[]) {
 
 function resolve<T extends { id: number; name: string }>(
   ref: string | number,
-  category: string,
+  category: MapReferenceCategory,
   ids: Map<number, T>,
   names: Map<string, T[]>,
 ): T {
-  const parsed = mapReferenceSchema.safeParse(ref);
-  if (!parsed.success)
-    throw new MapError(
-      "MAP_REFERENCE_INVALID",
-      "Use a positive safe integer ID or an exact name of at most 100 characters.",
-      { category },
-    );
-  const reference = parsed.data;
+  const query = mapReferenceQuery(category, ref);
+  const reference = query.reference;
   // Strings are exact names, not coercible IDs, prefixes or fuzzy matches.
   const item = typeof reference === "number" ? ids.get(reference) : undefined;
   const matches =
@@ -181,19 +181,12 @@ function resolve<T extends { id: number; name: string }>(
       : item
         ? [item]
         : [];
-  const match = matches[0];
-  if (matches.length !== 1 || !match)
-    throw new MapError(
-      matches.length ? "MAP_REFERENCE_AMBIGUOUS" : "MAP_REFERENCE_UNKNOWN",
-      `Select an exact ${category} name or numeric ID; no match was inferred.`,
-      {
-        category,
-        reference,
-        candidateCount: matches.length,
-        candidates: matches.slice(0, 10).map(({ id, name }) => ({ id, name })),
-      },
-    );
-  return match;
+  resolveMapReference(category, ref, {
+    key: query.key,
+    candidateCount: matches.length,
+    candidates: matches.slice(0, 10).map(({ id, name }) => ({ id, name })),
+  });
+  return present(matches[0]);
 }
 
 export class MapCatalog {
@@ -229,6 +222,36 @@ export class MapCatalog {
 
   resolveSystem(ref: string | number): MapSystem {
     return resolve(ref, "system", this.systems, this.systemNames);
+  }
+  /** Global lookup evidence, including ambiguity outside a selected boundary. */
+  resolutionFact(query: MapReferenceQuery): MapResolutionFact {
+    const ids =
+      query.category === "system"
+        ? this.systems
+        : query.category === "region"
+          ? this.regions
+          : this.constellations;
+    const names =
+      query.category === "system"
+        ? this.systemNames
+        : query.category === "region"
+          ? this.regionNames
+          : this.constellationNames;
+    const item =
+      typeof query.reference === "number"
+        ? ids.get(query.reference)
+        : undefined;
+    const matches =
+      typeof query.reference === "string"
+        ? (names.get(query.reference.trim().toLowerCase()) ?? [])
+        : item
+          ? [item]
+          : [];
+    return {
+      key: query.key,
+      candidateCount: matches.length,
+      candidates: matches.slice(0, 10).map(({ id, name }) => ({ id, name })),
+    };
   }
   resolveRegion(ref: string | number): MapData["regions"][number] {
     return resolve(ref, "region", this.regions, this.regionNames);

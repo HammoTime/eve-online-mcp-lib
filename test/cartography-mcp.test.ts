@@ -6,8 +6,20 @@ import {
   registerCartography,
   mapResultSchema,
 } from "../src/cartography/mcp.js";
-import { MapError, type MapData } from "../src/cartography/types.js";
-import type { CartographyServices } from "../src/cartography/service.js";
+import {
+  MapError,
+  mapRequestSchema,
+  type MapData,
+  type MapRequest,
+} from "../src/cartography/types.js";
+import {
+  prepareMapScene,
+  type PreparedMapScene,
+} from "../src/cartography/prepared.js";
+import type {
+  CartographyServices,
+  MapDataSource,
+} from "../src/cartography/service.js";
 import {
   projectInput,
   projectOutput,
@@ -59,7 +71,7 @@ async function setup(
 ) {
   const catalog = new MapCatalog(data);
   let svg = "";
-  const services: CartographyServices = {
+  const services: CartographyServices & { data: MapDataSource } = {
     data: {
       initialize: vi.fn(() =>
         Promise.resolve({
@@ -125,6 +137,100 @@ async function setup(
   return { client, services, server };
 }
 describe("renderer-only map MCP", () => {
+  it.each([undefined, "2024-11-05", "2025-03-26"])(
+    "keeps prepared-source delivery identical for protocol %s",
+    async (protocolVersionHint) => {
+      const options = {
+        preview: "ready" as const,
+        stale: true,
+        ...(protocolVersionHint ? { protocolVersionHint } : {}),
+      };
+      const original = await setup(options);
+      const prepared = await setup(options);
+      const services: CartographyServices = prepared.services;
+      const { catalog, status } = await prepared.services.data.initialize();
+      const prepare = vi.fn((input: MapRequest, signal?: AbortSignal) => {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        return Promise.resolve({
+          scene: prepareMapScene(catalog, input),
+          status,
+        });
+      });
+      const finish = vi.fn();
+      services.beginRender = () => finish;
+      services.data = { prepare };
+      const call = {
+        name: "render_eve_map",
+        arguments: { ...request, preview: "png" },
+      };
+      expect(await prepared.client.callTool(call)).toEqual(
+        await original.client.callTool(call),
+      );
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(finish).toHaveBeenCalledOnce();
+      expect(services.artifacts.put).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("holds prepared admission through pending work and releases on provider/scene failures", async () => {
+    const setupResult = await setup();
+    const { client } = setupResult;
+    const { catalog, status } = await setupResult.services.data.initialize();
+    const services: CartographyServices = setupResult.services;
+    const finish = vi.fn();
+    services.beginRender = () => finish;
+    let ready!: (value: {
+      scene: PreparedMapScene;
+      status: typeof status;
+    }) => void;
+    const pending = new Promise<{
+      scene: PreparedMapScene;
+      status: typeof status;
+    }>((resolve) => {
+      ready = resolve;
+    });
+    const prepare = vi.fn(() => pending);
+    services.data = { prepare };
+    const call = client.callTool({
+      name: "render_eve_map",
+      arguments: request,
+    });
+    await vi.waitFor(() => {
+      expect(prepare).toHaveBeenCalledOnce();
+    });
+    expect(finish).not.toHaveBeenCalled();
+    ready({
+      scene: prepareMapScene(catalog, mapRequestSchema.parse(request)),
+      status,
+    });
+    await call;
+    expect(finish).toHaveBeenCalledTimes(1);
+    prepare.mockRejectedValueOnce(
+      new MapError("MAP_DATA_UNAVAILABLE", "No map data"),
+    );
+    expect(
+      (await client.callTool({ name: "render_eve_map", arguments: request }))
+        .structuredContent,
+    ).toMatchObject({ code: "MAP_DATA_UNAVAILABLE" });
+    prepare.mockResolvedValueOnce({ scene: {} as PreparedMapScene, status });
+    expect(
+      (await client.callTool({ name: "render_eve_map", arguments: request }))
+        .structuredContent,
+    ).toMatchObject({ code: "MAP_DATA_INVALID" });
+    prepare.mockResolvedValueOnce({
+      scene: prepareMapScene(
+        catalog,
+        mapRequestSchema.parse({ ...request, title: "Other request" }),
+      ),
+      status,
+    });
+    expect(
+      (await client.callTool({ name: "render_eve_map", arguments: request }))
+        .structuredContent,
+    ).toMatchObject({ code: "INVALID_MAP_REQUEST" });
+    expect(finish).toHaveBeenCalledTimes(4);
+    expect(services.artifacts.put).toHaveBeenCalledTimes(1);
+  });
   it("requires an explicit boundary and POI list and exposes no planning arguments", async () => {
     const { client, services } = await setup();
     const { tools } = await client.listTools();

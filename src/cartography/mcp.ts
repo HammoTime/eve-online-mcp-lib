@@ -7,7 +7,7 @@ import {
 } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { attributes, diagnosticMetadata, withSpan } from "../telemetry.js";
-import { renderMap } from "./render.js";
+import { renderMap, renderPreparedMap } from "./render.js";
 import { MapError, MAP_LIMITS, mapRequestSchema } from "./types.js";
 import type { CartographyServices } from "./service.js";
 
@@ -119,9 +119,16 @@ export function registerCartography(
             const signal = ctx.mcpReq.signal;
             signal.throwIfAborted();
             finish = services.beginRender?.(signal);
-            const { catalog, status } = await services.data.initialize();
+            const prepared =
+              "prepare" in services.data
+                ? await services.data.prepare(request, signal)
+                : await services.data.initialize();
+            const { status } = prepared;
             signal.throwIfAborted();
-            const map = renderMap(catalog, request);
+            const map =
+              "scene" in prepared
+                ? renderPreparedMap(prepared.scene, request)
+                : renderMap(prepared.catalog, request);
             const warnings = [...map.warnings];
             if (status.stale)
               warnings.push({

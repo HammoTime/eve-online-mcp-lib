@@ -8,15 +8,15 @@ import {
   tooDense,
   wrapText,
 } from "./layout.js";
-import type { Box, LabelLine, RouteLeg } from "./layout.js";
-import { MAP_FONT, MAP_THEMES, ROUTE_DASHES } from "./themes.js";
+import type { Box, LabelLine } from "./layout.js";
 import {
-  LIGHT_YEAR_METRES,
-  MAP_LIMITS,
-  MapError,
-  mapRequestSchema,
-} from "./types.js";
-import type { MapRequest, MapSystem, RenderedMap } from "./types.js";
+  prepareMapScene,
+  readPreparedMapScene,
+  type PreparedMapScene,
+} from "./prepared.js";
+import { MAP_FONT, MAP_THEMES, ROUTE_DASHES } from "./themes.js";
+import { MAP_LIMITS, MapError } from "./types.js";
+import type { MapRequest, RenderedMap } from "./types.js";
 
 function escapeXml(value: string): string {
   return value
@@ -46,112 +46,26 @@ function number(value: number): string {
 
 /** Pure renderer: scopes and ordered paths are entirely caller-supplied. */
 export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
-  const parsed = mapRequestSchema.safeParse(input);
-  if (!parsed.success)
-    throw new MapError("INVALID_MAP_REQUEST", "Invalid map request.", {
-      issues: parsed.error.issues,
-    });
-  const request = parsed.data;
+  return renderPreparedMap(prepareMapScene(catalog, input));
+}
+
+/** Renders only validated selected facts. Optional input binds a provider result to its request. */
+export function renderPreparedMap(
+  scene: PreparedMapScene,
+  input?: MapRequest,
+): RenderedMap {
+  const {
+    request,
+    source,
+    systems,
+    internalPairs: edges,
+    boundaryConnections,
+    boundaryLabel,
+    pointsOfInterest,
+    routes,
+    legs,
+  } = readPreparedMapScene(scene, input);
   const boundary = request.boundary;
-  let systems: MapSystem[];
-  let boundaryLabel: string;
-  switch (boundary.kind) {
-    case "systems":
-      systems = [
-        ...new Map(
-          boundary.systems.map((ref) => {
-            const system = catalog.resolveSystem(ref);
-            return [system.id, system] as const;
-          }),
-        ).values(),
-      ];
-      boundaryLabel = `Explicit systems / ${systems.length} selected`;
-      break;
-    case "region": {
-      const region = catalog.resolveRegion(boundary.region);
-      systems = [...catalog.systems.values()].filter(
-        (system) => system.regionId === region.id,
-      );
-      boundaryLabel = `Region / ${region.name}`;
-      break;
-    }
-    case "constellation": {
-      const constellation = catalog.resolveConstellation(
-        boundary.constellation,
-      );
-      systems = [...catalog.systems.values()].filter(
-        (system) => system.constellationId === constellation.id,
-      );
-      boundaryLabel = `Constellation / ${constellation.name}`;
-      break;
-    }
-    case "extent":
-      systems = [...catalog.systems.values()].filter((system) => {
-        const x = system.position.x / LIGHT_YEAR_METRES;
-        const z = system.position.z / LIGHT_YEAR_METRES;
-        return (
-          x >= boundary.minX &&
-          x <= boundary.maxX &&
-          z >= boundary.minZ &&
-          z <= boundary.maxZ
-        );
-      });
-      boundaryLabel = `X/Z extent (ly) / X ${boundary.minX} to ${boundary.maxX}; Z ${boundary.minZ} to ${boundary.maxZ}`;
-      break;
-  }
-  systems.sort((a, b) => a.id - b.id);
-  if (!systems.length)
-    throw new MapError(
-      "EMPTY_MAP_BOUNDARY",
-      "The explicit boundary contains no systems.",
-    );
-  if (systems.length > MAP_LIMITS.systems)
-    throw new MapError(
-      "MAP_TOO_LARGE",
-      `The complete boundary contains ${systems.length} systems; the limit is ${MAP_LIMITS.systems}. No systems were trimmed.`,
-      { systemCount: systems.length },
-    );
-  const selected = new Set(systems.map((system) => system.id));
-  const resolveInside = (reference: string | number): MapSystem => {
-    const system = catalog.resolveSystem(reference);
-    if (!selected.has(system.id))
-      throw new MapError(
-        "OUT_OF_BOUNDARY",
-        `System ${system.id} is outside the explicit map boundary.`,
-        { systemId: system.id },
-      );
-    return system;
-  };
-  const pointsOfInterest = request.pointsOfInterest.map((poi) => {
-    const system = resolveInside(poi.system);
-    return {
-      systemId: system.id,
-      systemName: system.name,
-      label: poi.label,
-      kind: poi.kind,
-      ...(poi.note === undefined ? {} : { note: poi.note }),
-    };
-  });
-  const legs: RouteLeg[] = [];
-  const routes = request.routes.map((route, index) => {
-    const path = route.systems.map(resolveInside);
-    for (let hop = 1; hop < path.length; hop++) {
-      const from = present(path[hop - 1]).id;
-      const to = present(path[hop]).id;
-      if (!catalog.hasGate(from, to))
-        throw new MapError(
-          "INVALID_ROUTE_ADJACENCY",
-          `Route ${index + 1}, hop ${hop}: no directed gate from ${from} to ${to}. Routes are never repaired.`,
-          { route: index + 1, hop, from, to },
-        );
-      legs.push({ from, to, route: index, hop });
-    }
-    return {
-      label: route.label ?? `Route ${index + 1}`,
-      systems: path.map(({ id, name }) => ({ id, name })),
-      jumps: path.length - 1,
-    };
-  });
   const important = new Set([
     ...pointsOfInterest.map((poi) => poi.systemId),
     ...routes.flatMap((route) => route.systems.map((system) => system.id)),
@@ -163,11 +77,6 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
       index + 1,
     ]),
   );
-  const outgoing = new Map<number, number>();
-  for (const gate of catalog.data.gates) {
-    if (!selected.has(gate.systemId)) continue;
-    outgoing.set(gate.systemId, (outgoing.get(gate.systemId) ?? 0) + 1);
-  }
   const labelText = new Map<number, LabelLine[]>();
   const systemDetails = new Map<number, string>();
   for (const system of systems) {
@@ -177,15 +86,15 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
       text,
       size,
     }));
-    const gateCount = outgoing.get(system.id) ?? 0;
+    const gateCount = system.outgoingGateCount;
     const poiIds = (poiNumbers.get(system.id) ?? []).map(
       (value) => `P${value}`,
     );
     const details = [
       `${system.name} (ID ${system.id})`,
       `raw security ${system.securityStatus}`,
-      `region ${catalog.resolveRegion(system.regionId).name}`,
-      `constellation ${catalog.resolveConstellation(system.constellationId).name}`,
+      `region ${system.regionName}`,
+      `constellation ${system.constellationName}`,
       `${gateCount} outgoing SDE gates, including connections outside this boundary`,
     ];
     if (poiIds.length) details.push(poiIds.join(" / "));
@@ -285,24 +194,15 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
       code: "CONTEXT_LABELS_OMITTED",
       message: `${layout.omittedLabels} context labels omitted for readability; all selected nodes and all important labels remain.`,
     });
-  const edges = new Map<string, { from: number; to: number }>();
-  const boundaryEdges = new Set<string>();
-  for (const gate of catalog.data.gates) {
-    const from = Math.min(gate.systemId, gate.destinationId);
-    const to = Math.max(gate.systemId, gate.destinationId);
-    const key = `${from}:${to}`;
-    if (selected.has(from) && selected.has(to)) edges.set(key, { from, to });
-    else if (selected.has(from) || selected.has(to)) boundaryEdges.add(key);
-  }
-  if (boundaryEdges.size)
+  if (boundaryConnections)
     warnings.push({
       code: "BOUNDARY_CONNECTIONS",
-      message: `${boundaryEdges.size} gate connections leave the explicit boundary and are not drawn.`,
+      message: `${boundaryConnections} gate connections leave the explicit boundary and are not drawn.`,
     });
   const title = request.title ?? "Stellar atlas";
   const summary = {
     systemCount: systems.length,
-    edgeCount: edges.size,
+    edgeCount: edges.length,
     boundaryLabel,
     routes,
     pointsOfInterest,
@@ -314,7 +214,7 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
   };
   const completeness = {
     omittedLabels: layout.omittedLabels,
-    boundaryConnections: boundaryEdges.size,
+    boundaryConnections,
   };
   const theme = MAP_THEMES[request.theme];
   const svg: string[] = [];
@@ -355,7 +255,7 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
     `<title id="map-title">${escapeXml(title)}</title><desc id="map-desc">${escapeXml(`${boundaryLabel}. ${systems.length} systems. ${layout.coordinateBasis}. ${layout.used === "atlas" ? "Atlas not to scale. " : "Geographic coordinates are not moved. "}Caller-supplied plans. Not live intel. P numbers link nodes to the points of interest list; R numbers identify ordered routes. Visible security is approximate (~), rounded to two decimals; tooltips retain raw SDE values and all route visits. No safety classification. Gate counts are outgoing SDE gates, including connections outside the boundary. Background gates are masked only beneath label text. ${layout.omittedLabels} context labels omitted.`)}</desc>`,
   );
   svg.push(
-    `<metadata>${escapeXml(JSON.stringify({ schemaVersion: 1, source: { buildNumber: catalog.data.buildNumber, releaseDate: catalog.data.releaseDate, sourceUrl: catalog.data.sourceUrl, fetchedAt: catalog.data.fetchedAt }, summary, layout: layoutSummary, projectionBounds: layout.bounds, completeness, warnings }))}</metadata>`,
+    `<metadata>${escapeXml(JSON.stringify({ schemaVersion: 1, source, summary, layout: layoutSummary, projectionBounds: layout.bounds, completeness, warnings }))}</metadata>`,
   );
   svg.push(
     `<rect width="${width}" height="${height}" rx="28" fill="${theme.background}"/><rect x="20" y="20" width="${width - 40}" height="860" rx="24" fill="none" stroke="${theme.frame}" stroke-width="1.5" data-frame="outer"/>`,
@@ -389,9 +289,7 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
   }
   svg.push('</mask></defs><g data-gates="true" mask="url(#gate-label-mask)">');
   const byId = new Map(layout.nodes.map((node) => [node.system.id, node]));
-  for (const edge of [...edges.values()].sort(
-    (a, b) => a.from - b.from || a.to - b.to,
-  )) {
+  for (const edge of edges) {
     const a = present(byId.get(edge.from));
     const b = present(byId.get(edge.to));
     const routed = layout.curves.find(
@@ -494,7 +392,7 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
   text(
     60,
     712,
-    `${layout.used === "atlas" ? "Atlas / not to scale" : "X/Z projection"} | ${systems.length} systems | ${boundaryEdges.size} external links | ${layout.omittedLabels} hidden labels`,
+    `${layout.used === "atlas" ? "Atlas / not to scale" : "X/Z projection"} | ${systems.length} systems | ${boundaryConnections} external links | ${layout.omittedLabels} hidden labels`,
     18,
     theme.muted,
   );
@@ -585,7 +483,7 @@ export function renderMap(catalog: MapCatalog, input: MapRequest): RenderedMap {
     svg.push("</g>");
   }
   wrapped(
-    `SDE build ${catalog.data.buildNumber} / ${catalog.data.releaseDate} | Sec ~2dp; raw in tooltips; no safety classification`,
+    `SDE build ${source.buildNumber} / ${source.releaseDate} | Sec ~2dp; raw in tooltips; no safety classification`,
     48,
     873,
     18,
