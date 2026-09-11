@@ -71,6 +71,7 @@ export interface PreparedMapFacts {
 }
 export type ResolvedMapBoundary =
   | { kind: "systems"; systemIds: number[] }
+  | { kind: "neighborhood"; centerId: number; name: string; jumps: 1 }
   | { kind: "region"; regionId: number; name: string }
   | { kind: "constellation"; constellationId: number; name: string }
   | Extract<MapRequest["boundary"], { kind: "extent" }>;
@@ -181,6 +182,15 @@ function resolvedBoundary(
       const region = resolve("region", boundary.region);
       return { kind: "region", regionId: region.id, name: region.name };
     }
+    case "neighborhood": {
+      const center = resolve("system", boundary.center);
+      return {
+        kind: "neighborhood",
+        centerId: center.id,
+        name: center.name,
+        jumps: 1,
+      };
+    }
     case "constellation": {
       const constellation = resolve("constellation", boundary.constellation);
       return {
@@ -203,7 +213,10 @@ export function resolveMapBoundary(
   return resolvedBoundary(request, resolutionLookup(request, resolutions));
 }
 
-function inside(system: MapSystem, boundary: ResolvedMapBoundary): boolean {
+function inside(
+  system: MapSystem,
+  boundary: Exclude<ResolvedMapBoundary, { kind: "neighborhood" }>,
+): boolean {
   switch (boundary.kind) {
     case "systems":
       return boundary.systemIds.includes(system.id);
@@ -269,7 +282,8 @@ export function createPreparedMapScene(
   if (
     selected.size !== facts.systemCount ||
     systems.length !== facts.systemCount ||
-    systems.some((system) => !inside(system, boundary))
+    (boundary.kind !== "neighborhood" &&
+      systems.some((system) => !inside(system, boundary)))
   )
     invalid(
       "Selected systems must cover the complete explicit map boundary exactly once.",
@@ -354,6 +368,23 @@ export function createPreparedMapScene(
       (internalOutgoing.get(pair.to) ?? 0) + pair.reverseGateCount,
     );
   }
+  if (boundary.kind === "neighborhood") {
+    const center = selected.get(boundary.centerId);
+    if (!center) invalid("Neighborhood center is missing.");
+    if (
+      center.outgoingGateCount !== (internalOutgoing.get(center.id) ?? 0) ||
+      systems.some(
+        (system) =>
+          system.id !== center.id &&
+          !pairs.has(
+            `${Math.min(center.id, system.id)}:${Math.max(center.id, system.id)}`,
+          ),
+      )
+    )
+      invalid(
+        "Selected neighborhood must contain its center and only direct permanent-stargate neighbors, with no outgoing center gates omitted.",
+      );
+  }
   if (
     [...internalOutgoing.values()].reduce((sum, count) => sum + count, 0) +
       facts.boundaryConnections >
@@ -416,11 +447,13 @@ export function createPreparedMapScene(
   const boundaryLabel =
     boundary.kind === "systems"
       ? `Explicit systems / ${systems.length} selected`
-      : boundary.kind === "region"
-        ? `Region / ${boundary.name}`
-        : boundary.kind === "constellation"
-          ? `Constellation / ${boundary.name}`
-          : `X/Z extent (ly) / X ${boundary.minX} to ${boundary.maxX}; Z ${boundary.minZ} to ${boundary.maxZ}`;
+      : boundary.kind === "neighborhood"
+        ? `Neighborhood / ${boundary.name} / 1 jump (permanent stargates)`
+        : boundary.kind === "region"
+          ? `Region / ${boundary.name}`
+          : boundary.kind === "constellation"
+            ? `Constellation / ${boundary.name}`
+            : `X/Z extent (ly) / X ${boundary.minX} to ${boundary.maxX}; Z ${boundary.minZ} to ${boundary.maxZ}`;
   const scene = Object.freeze({}) as PreparedMapScene;
   scenes.set(scene, {
     request,
@@ -468,7 +501,11 @@ export function prepareMapScene(
   );
   const boundary = resolveMapBoundary(request, resolutions);
   const selected = [...catalog.systems.values()].filter((system) =>
-    inside(system, boundary),
+    boundary.kind === "neighborhood"
+      ? system.id === boundary.centerId ||
+        catalog.hasGate(boundary.centerId, system.id) ||
+        catalog.hasGate(system.id, boundary.centerId)
+      : inside(system, boundary),
   );
   const ids = new Set(selected.map((system) => system.id));
   const outgoing = new Map<number, number>();

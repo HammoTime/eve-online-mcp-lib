@@ -86,7 +86,7 @@ export const mapResultSchema = z.union([
 ]);
 
 export const MAP_INSTRUCTIONS =
-  "Use render_eve_map only to visualize an existing plan: supply an explicit boundary, pointsOfInterest (or []), and any already-ordered route systems obtained from other tools. It never plans, recommends destinations or computes routes. SVG is the primary artifact, with an optional PNG preview; inline display depends on the host. Retrieve the original through its MCP resource URI, not by treating it as a public web URL. No EVE login is needed.";
+  "Use render_eve_map only to visualize an existing plan: supply an explicit boundary, pointsOfInterest (or []), and any already-ordered route systems obtained from other tools. For a system and its immediate permanent-stargate neighbors, request boundary:{kind:'neighborhood',center:<exact system name or numeric ID>,jumps:1} directly; no ESI discovery or per-neighbor calls are needed. Only jumps:1 is supported and is the default. It never plans, recommends destinations or computes routes. SVG is the primary artifact, with an optional PNG preview; inline display depends on the host. Retrieve the original through its MCP resource URI, not by treating it as a public web URL. No EVE login is needed.";
 
 /** Host-independent renderer registration. No EsiClient/planner/auth dependency. */
 export function registerCartography(
@@ -99,7 +99,7 @@ export function registerCartography(
     {
       title: "Render an EVE Online map of an existing plan",
       description:
-        "Render an EVE Online SVG from an explicit boundary, a required list of points of interest and optional already-planned ordered routes. Exact names or numeric IDs; permanent gates only. Never creates plans, chooses destinations, calculates routes or recommends activities. Reads public SDE geography, writes private generated artifacts (up to seven days, subject to storage eviction), and optionally returns a PNG preview. No game-state changes or EVE login. Inline display is host-dependent; read the returned SVG MCP resource for the original.",
+        "Render an EVE Online SVG from an explicit boundary, a required list of points of interest and optional already-planned ordered routes. Exact names or numeric IDs; permanent gates only. Request boundary:{kind:'neighborhood',center:<exact system name or numeric ID>,jumps:1} directly for the center plus all incoming/outgoing permanent-stargate neighbors from validated SDE, without ESI discovery or per-neighbor calls. jumps defaults to 1; only 1 is supported. All boundaries are limited to 250 systems; oversized scopes fail without trimming. Never creates plans, chooses destinations, calculates routes or recommends activities. Reads public SDE geography, writes private generated artifacts (up to seven days, subject to storage eviction), and optionally returns a PNG preview. No game-state changes or EVE login. Inline display is host-dependent; read the returned SVG MCP resource for the original.",
       inputSchema: mapRequestSchema,
       outputSchema: mapResultSchema,
       annotations: {

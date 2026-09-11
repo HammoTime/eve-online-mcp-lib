@@ -239,6 +239,10 @@ describe("renderer-only map MCP", () => {
       expect.arrayContaining(["boundary", "pointsOfInterest"]),
     );
     expect(tools[0]?.description).toContain("Never creates plans");
+    expect(tools[0]?.description).toContain("kind:'neighborhood'");
+    expect(tools[0]?.description).toContain(
+      "without ESI discovery or per-neighbor calls",
+    );
     expect(tools[0]?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
@@ -489,10 +493,33 @@ describe("renderer-only map MCP", () => {
     expect(services.data.initialize).not.toHaveBeenCalled();
     expect(finish).toHaveBeenCalledOnce();
   });
-  it("does not capture POI notes, full routes or artifact handles in diagnostics", () => {
+  it("renders a neighborhood directly without any ESI or other network fetch", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected map fetch"));
+    const { client } = await setup();
+    const result = await client.callTool({
+      name: "render_eve_map",
+      arguments: {
+        ...request,
+        boundary: { kind: "neighborhood", center: " Test 1 " },
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      summary: {
+        systemCount: 2,
+        edgeCount: 1,
+        boundaryLabel: "Neighborhood / Test 1 / 1 jump (permanent stargates)",
+      },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("does not capture neighborhood centers, POI notes, full routes or artifact handles in diagnostics", () => {
     expect(TOOL_NAMES.has("render_eve_map")).toBe(true);
     const input = projectInput({
       ...request,
+      boundary: { kind: "neighborhood", center: "PRIVATE CENTER", jumps: 1 },
       title: "PRIVATE",
       pointsOfInterest: [{ system: 1, label: "PRIVATE" }],
     });

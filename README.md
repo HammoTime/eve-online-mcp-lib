@@ -118,6 +118,12 @@ consumers supply public SDE map data, private artifact storage and optionally a 
 preview adapter. It is a renderer only: `boundary` and `pointsOfInterest` are required,
 and supplied route sequences are validated without planning, repair or expansion.
 There is no ESI/planner/auth dependency in the renderer or its registration module.
+Request `boundary: { kind: "neighborhood", center: "Jita", jumps: 1 }` directly
+for a center and all its distinct incoming/outgoing permanent-stargate neighbors
+from validated SDE, without an ESI discovery chain. Names/IDs use the existing exact
+reference resolver. `jumps` defaults to `1`; other values are rejected. Selection
+never expands POIs/routes or a second hop, and the existing 250-system limit fails
+with the complete count rather than trimming the neighborhood.
 Absent adapters leave existing consumers unchanged. Never expose stored artifacts
 across users without an owner-scoped adapter; base geography being public does not
 make caller-authored plans public.

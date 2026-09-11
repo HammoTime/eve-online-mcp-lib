@@ -98,6 +98,17 @@ function facts(data: MapData, input: MapRequest): PreparedMapFacts {
     switch (boundary.kind) {
       case "systems":
         return boundary.systemIds.includes(system.id);
+      case "neighborhood":
+        return (
+          system.id === boundary.centerId ||
+          data.gates.some(
+            (gate) =>
+              (gate.systemId === boundary.centerId &&
+                gate.destinationId === system.id) ||
+              (gate.destinationId === boundary.centerId &&
+                gate.systemId === system.id),
+          )
+        );
       case "region":
         return system.regionId === boundary.regionId;
       case "constellation":
@@ -274,17 +285,25 @@ describe("prepared map scenes", () => {
     expect(enumerateMapReferences(maximum)).toHaveLength(562);
   });
 
-  it.each(["systems", "region", "constellation", "extent"] as const)(
+  it.each([
+    "systems",
+    "region",
+    "constellation",
+    "extent",
+    "neighborhood",
+  ] as const)(
     "preserves exact SVG/results for %s scopes, palettes, layouts and sizes",
     (kind) => {
       const boundary: MapRequest["boundary"] =
         kind === "systems"
           ? { kind, systems: [" beta ", 3, "ALPHA", 1, "1"] }
-          : kind === "region"
-            ? { kind, region: " region " }
-            : kind === "constellation"
-              ? { kind, constellation: 200 }
-              : { kind, minX: 0, maxX: 8, minZ: 0, maxZ: 3 };
+          : kind === "neighborhood"
+            ? { kind, center: " beta ", jumps: 1 }
+            : kind === "region"
+              ? { kind, region: " region " }
+              : kind === "constellation"
+                ? { kind, constellation: 200 }
+                : { kind, minX: 0, maxX: 8, minZ: 0, maxZ: 3 };
       for (const theme of ["dark", "light"] as const)
         for (const layout of ["atlas", "geographic"] as const)
           for (const size of ["standard", "wide"] as const) {
@@ -354,6 +373,202 @@ describe("prepared map scenes", () => {
       ]),
     });
   });
+
+  it("selects the center once and every direct incoming/outgoing neighbor, never a second hop", () => {
+    const data = fixture();
+    const input = request({
+      boundary: { kind: "neighborhood", center: " ALPHA ", jumps: 1 },
+      routes: [{ systems: [4, 1, 2, 1] }],
+      pointsOfInterest: [
+        { system: 4, label: "Incoming neighbor", kind: "waypoint" },
+      ],
+    });
+    const result = parity(data, input);
+    expect(result).toMatchObject({
+      summary: {
+        systemCount: 3,
+        edgeCount: 2,
+        boundaryLabel: "Neighborhood / Alpha / 1 jump (permanent stargates)",
+      },
+      completeness: { boundaryConnections: 1 },
+    });
+    const scene = readPreparedMapScene(
+      prepareMapScene(new MapCatalog(data), input),
+    );
+    expect(scene.systems.map(({ id }) => id)).toEqual([1, 2, 4]);
+    expect(
+      scene.systems.map(({ outgoingGateCount }) => outgoingGateCount),
+    ).toEqual([2, 2, 1]);
+    expect(
+      parity(data, request({ ...input, routes: [{ systems: [1, 4] }] })),
+    ).toMatchObject({ code: "INVALID_ROUTE_ADJACENCY" });
+    expect(
+      parity(data, request({ ...input, routes: [{ systems: [1, 1] }] })),
+    ).toMatchObject({ code: "INVALID_ROUTE_ADJACENCY" });
+    expect(
+      parity(
+        data,
+        request({
+          ...input,
+          pointsOfInterest: [
+            { system: 3, label: "Second hop", kind: "activity" },
+          ],
+        }),
+      ),
+    ).toMatchObject({ code: "OUT_OF_BOUNDARY", details: { systemId: 3 } });
+    expect(
+      parity(data, request({ ...input, routes: [{ systems: [1, 2, 3] }] })),
+    ).toMatchObject({ code: "OUT_OF_BOUNDARY" });
+    data.gates = [];
+    expect(parity(data, request({ boundary: input.boundary }))).toMatchObject({
+      summary: { systemCount: 1, edgeCount: 0 },
+    });
+  });
+
+  it("defaults to exactly one jump and rejects unsupported or malformed neighborhoods", () => {
+    expect(
+      mapRequestSchema.parse({
+        boundary: { kind: "neighborhood", center: "Alpha" },
+        pointsOfInterest: [],
+      }).boundary,
+    ).toEqual({ kind: "neighborhood", center: "Alpha", jumps: 1 });
+    for (const boundary of [
+      { kind: "neighborhood", center: "Alpha", jumps: 0 },
+      { kind: "neighborhood", center: "Alpha", jumps: 2 },
+      { kind: "neighborhood", center: "Alpha", jumps: 1.5 },
+      { kind: "neighborhood", center: "Alpha", jumps: "1" },
+      { kind: "neighborhood", center: "Alpha", jumps: null },
+      { kind: "neighborhood", center: 0 },
+      { kind: "neighborhood", center: "" },
+      { kind: "neighborhood", center: { id: 1 } },
+      { kind: "neighborhood", center: "Alpha", recursive: true },
+      { kind: "neighborhood" },
+    ])
+      expect(
+        mapRequestSchema.safeParse({ boundary, pointsOfInterest: [] }).success,
+      ).toBe(false);
+  });
+
+  it("resolves neighborhood centers globally with normal ID/name and ambiguity semantics", () => {
+    const data = fixture();
+    for (const [center, ids] of [
+      [1, [1, 2, 4]],
+      ["1", [2, 3, 5]],
+    ] as const) {
+      const input = request({
+        boundary: { kind: "neighborhood", center, jumps: 1 },
+      });
+      parity(data, input);
+      expect(
+        readPreparedMapScene(
+          prepareMapScene(new MapCatalog(data), input),
+        ).systems.map(({ id }) => id),
+      ).toEqual(ids);
+    }
+    for (const center of [999, "missing"])
+      expect(
+        parity(
+          data,
+          request({ boundary: { kind: "neighborhood", center, jumps: 1 } }),
+        ),
+      ).toMatchObject({ code: "MAP_REFERENCE_UNKNOWN" });
+    for (let id = 6; id < 20; id++)
+      data.systems.push({ ...present(data.systems[0]), id });
+    expect(
+      parity(
+        data,
+        request({
+          boundary: { kind: "neighborhood", center: " Alpha ", jumps: 1 },
+        }),
+      ),
+    ).toMatchObject({
+      code: "MAP_REFERENCE_AMBIGUOUS",
+      details: { candidateCount: 15, candidates: expect.any(Array) },
+    });
+  });
+
+  it.each([250, 251])(
+    "retains the complete %i-system neighborhood count before annotation errors",
+    (count) => {
+      const data = fixture();
+      data.systems = Array.from({ length: count }, (_, index) => ({
+        ...present(data.systems[0]),
+        id: index + 1,
+        name: `System ${index + 1}`,
+      }));
+      data.gates = data.systems.slice(1).map(({ id }) => ({
+        id: 1000 + id,
+        systemId: 1,
+        destinationId: id,
+        destinationGateId: 2000 + id,
+      }));
+      const input = request({
+        boundary: { kind: "neighborhood", center: 1, jumps: 1 },
+      });
+      if (count === 250)
+        expect(
+          readPreparedMapScene(prepareMapScene(new MapCatalog(data), input))
+            .systems,
+        ).toHaveLength(250);
+      else
+        expect(
+          parity(
+            data,
+            request({
+              ...input,
+              pointsOfInterest: [
+                { system: "missing", label: "Later", kind: "activity" },
+              ],
+            }),
+          ),
+        ).toMatchObject({
+          code: "MAP_TOO_LARGE",
+          details: { systemCount: 251 },
+        });
+    },
+  );
+
+  it.each(["missing center", "disconnected", "missing outgoing"])(
+    "rejects inconsistent neighborhood facts: %s",
+    (kind) => {
+      const input = request({
+        boundary: { kind: "neighborhood", center: 1, jumps: 1 },
+      });
+      const value = facts(fixture(), input);
+      if (kind === "missing center") {
+        value.systems = value.systems.filter(({ id }) => id !== 1);
+        value.systemCount--;
+        value.internalPairs = [];
+      } else if (kind === "disconnected") {
+        value.internalPairs = value.internalPairs.filter(({ to }) => to !== 4);
+      } else present(value.systems[0]).outgoingGateCount++;
+      expect(outcome(() => createPreparedMapScene(input, value))).toMatchObject(
+        { code: "MAP_DATA_INVALID" },
+      );
+    },
+  );
+
+  it.each(["self", "missing system", "missing parent", "coordinates"])(
+    "does not admit malformed catalog data for neighborhoods: %s",
+    (kind) => {
+      const data = fixture();
+      if (kind === "self") present(data.gates[0]).destinationId = 1;
+      if (kind === "missing system") data.systems.pop();
+      if (kind === "missing parent") data.constellations.pop();
+      if (kind === "coordinates")
+        present(data.systems[0]).position.x = Infinity;
+      expect(
+        outcome(() =>
+          prepareMapScene(
+            new MapCatalog(data),
+            request({
+              boundary: { kind: "neighborhood", center: 1, jumps: 1 },
+            }),
+          ),
+        ),
+      ).toMatchObject({ code: "MAP_DATA_INVALID" });
+    },
+  );
 
   it("uses global ambiguity counts and the first ten ID-sorted candidates, even outside the boundary", () => {
     const data = fixture();
@@ -614,42 +829,48 @@ describe("prepared map scenes", () => {
     });
   });
 
-  it("rejects forged handles and isolates input, snapshots and returned-result mutation", () => {
-    const data = fixture();
-    const input = request({ routes: [{ systems: [1, 2] }] });
-    const value = facts(data, input);
-    const scene = createPreparedMapScene(input, value);
-    const expected = renderPreparedMap(scene);
-    expect(Object.isFrozen(scene)).toBe(true);
-    expect(Reflect.ownKeys(scene)).toEqual([]);
-    expect(() => Object.assign(scene, { systems: [] })).toThrow(TypeError);
-    input.routes[0]?.systems.reverse();
-    present(value.systems[0]).position.x = NaN;
-    value.internalPairs.length = 0;
-    value.source.buildNumber++;
-    const snapshot = readPreparedMapScene(scene);
-    snapshot.systems.length = 0;
-    snapshot.request.title = "Mutated";
-    const result = renderPreparedMap(scene);
-    result.summary.routes.length = 0;
-    expect(renderPreparedMap(scene)).toEqual(expected);
-    for (const forged of [
-      {},
-      { ...scene },
-      Object.create(scene) as unknown,
-      structuredClone(scene),
-    ])
-      expect(
-        outcome(() => renderPreparedMap(forged as PreparedMapScene)),
-      ).toMatchObject({ code: "MAP_DATA_INVALID" });
-    expect(outcome(() => renderPreparedMap(scene, input))).toMatchObject({
-      code: "INVALID_MAP_REQUEST",
-    });
-    const catalog = new MapCatalog(fixture());
-    const prepared = prepareMapScene(catalog, request());
-    const before = renderPreparedMap(prepared);
-    catalog.data.gates.length = 0;
-    catalog.systems.clear();
-    expect(renderPreparedMap(prepared)).toEqual(before);
-  });
+  it.each([
+    { kind: "systems", systems: [1, 2, 3] },
+    { kind: "neighborhood", center: 2, jumps: 1 },
+  ] satisfies MapRequest["boundary"][])(
+    "rejects forged handles and isolates $kind input, snapshots and returned-result mutation",
+    (boundary) => {
+      const data = fixture();
+      const input = request({ boundary, routes: [{ systems: [1, 2] }] });
+      const value = facts(data, input);
+      const scene = createPreparedMapScene(input, value);
+      const expected = renderPreparedMap(scene);
+      expect(Object.isFrozen(scene)).toBe(true);
+      expect(Reflect.ownKeys(scene)).toEqual([]);
+      expect(() => Object.assign(scene, { systems: [] })).toThrow(TypeError);
+      input.routes[0]?.systems.reverse();
+      present(value.systems[0]).position.x = NaN;
+      value.internalPairs.length = 0;
+      value.source.buildNumber++;
+      const snapshot = readPreparedMapScene(scene);
+      snapshot.systems.length = 0;
+      snapshot.request.title = "Mutated";
+      const result = renderPreparedMap(scene);
+      result.summary.routes.length = 0;
+      expect(renderPreparedMap(scene)).toEqual(expected);
+      for (const forged of [
+        {},
+        { ...scene },
+        Object.create(scene) as unknown,
+        structuredClone(scene),
+      ])
+        expect(
+          outcome(() => renderPreparedMap(forged as PreparedMapScene)),
+        ).toMatchObject({ code: "MAP_DATA_INVALID" });
+      expect(outcome(() => renderPreparedMap(scene, input))).toMatchObject({
+        code: "INVALID_MAP_REQUEST",
+      });
+      const catalog = new MapCatalog(fixture());
+      const prepared = prepareMapScene(catalog, request());
+      const before = renderPreparedMap(prepared);
+      catalog.data.gates.length = 0;
+      catalog.systems.clear();
+      expect(renderPreparedMap(prepared)).toEqual(before);
+    },
+  );
 });

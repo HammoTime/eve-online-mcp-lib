@@ -45,6 +45,13 @@ export const mapBoundarySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("region"), region: mapReferenceSchema }).strict(),
   z
     .object({
+      kind: z.literal("neighborhood"),
+      center: mapReferenceSchema,
+      jumps: z.literal(1).default(1),
+    })
+    .strict(),
+  z
+    .object({
       kind: z.literal("constellation"),
       constellation: mapReferenceSchema,
     })
@@ -63,7 +70,7 @@ export const mapBoundarySchema = z.discriminatedUnion("kind", [
 export const mapRequestSchema = z
   .object({
     boundary: mapBoundarySchema.describe(
-      "Required explicit scope: systems, region, constellation, or inclusive X/Z extent in light years. Never inferred from a plan.",
+      "Required explicit scope: systems, region, constellation, neighborhood (center plus all incoming/outgoing permanent-stargate neighbors; jumps defaults to 1, only 1 supported), or inclusive X/Z extent in light years. Never inferred from a plan.",
     ),
     pointsOfInterest: z
       .array(

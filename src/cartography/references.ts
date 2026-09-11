@@ -75,6 +75,7 @@ export function enumerateMapReferences(input: MapRequest): MapReferenceQuery[] {
   if (boundary.kind === "systems")
     for (const ref of boundary.systems) add("system", ref);
   else if (boundary.kind === "region") add("region", boundary.region);
+  else if (boundary.kind === "neighborhood") add("system", boundary.center);
   else if (boundary.kind === "constellation")
     add("constellation", boundary.constellation);
   for (const poi of request.pointsOfInterest) add("system", poi.system);
