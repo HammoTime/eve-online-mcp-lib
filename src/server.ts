@@ -33,6 +33,7 @@ import { SkillPlanner } from "./skill-plan.js";
 import { planTargetSchema, targetListSchema } from "./skill-data.js";
 import { MAP_INSTRUCTIONS, registerCartography } from "./cartography/mcp.js";
 import type { CartographyServices } from "./cartography/service.js";
+import { toolOutputSchemas } from "./tool-output-schemas.js";
 
 const jsonRecord = z.record(z.string(), z.json()).optional();
 const positiveSafeInteger = z
@@ -145,6 +146,7 @@ export function createEveServer(
       description:
         "Initialize the configured CCP EVE Online static-data source and report its build and freshness. Refresh requests check for updates; a failed refresh may return a labelled older build. Public data needs no authentication. Planning also initializes automatically.",
       inputSchema: z.object({ refresh: z.boolean().default(false) }).strict(),
+      outputSchema: toolOutputSchemas.initialize_static_data,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ refresh }) => {
@@ -168,6 +170,7 @@ export function createEveServer(
       description:
         "Resolve public EVE Online SDE skill/ship names or type IDs deterministically before planning. Accepts Mining II, an exact hull, or Exhumer (unique singular skill alias). Bare skills default to level I. Unresolved/ambiguous inputs return candidates; never choose a hull or desired skill level for the user.",
       inputSchema: targetsSchema,
+      outputSchema: toolOutputSchemas.resolve_skill_plan_targets,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ target, targets }) => {
@@ -197,6 +200,7 @@ export function createEveServer(
       description:
         "Return the complete prerequisite skill-level graph for verified EVE Online SDE skill or ship targets, with directed prerequisite-to-dependent edges, deterministic topological order and cycle detection. No character data or login is used. A ship means minimum hull requirements, not fit viability.",
       inputSchema: targetsSchema,
+      outputSchema: toolOutputSchemas.get_skill_dependencies,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ target, targets }) => {
@@ -236,6 +240,7 @@ export function createEveServer(
             (value.target === undefined) !== (value.targets === undefined),
           "Supply exactly one of target or targets",
         ),
+      outputSchema: toolOutputSchemas.generate_skill_plan,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ characterId, target, targets, queuePolicy }) => {
@@ -273,6 +278,7 @@ export function createEveServer(
       description:
         "List authorized EVE Online character IDs, names, granted scopes, and the default character. Contains no tokens. Public ESI data never needs login; protected requests use the host’s character authorization flow. Use authorize_eve_character to renew consent or fix missing scopes.",
       inputSchema: z.object({}),
+      outputSchema: toolOutputSchemas.list_eve_characters,
       annotations: { ...READ_ONLY_ANNOTATIONS, openWorldHint: false },
     },
     async () => {
@@ -296,6 +302,7 @@ export function createEveServer(
       description:
         "Start the host’s EVE Online SSO authorization flow for the requested character. Hosted servers return a browser authorization link; local servers open the browser. Use when authorization is missing, expired, revoked, or lacks scopes. Tell the user to select this character in the browser; they never need commands or tokens. A different character selection is rejected without replacing saved credentials. Grants only the pinned read-only ESI scopes and does not change game state. Retry the protected request after success.",
       inputSchema: z.object({ characterId: positiveSafeInteger }),
+      outputSchema: toolOutputSchemas.authorize_eve_character,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -326,6 +333,7 @@ export function createEveServer(
       description:
         "Choose an already authorized EVE Online character for protected operations without a character_id path parameter, such as corporation or structure requests. Character-specific operations always use their requested character. Changes only the current session default, without changing game state or granting corporation roles.",
       inputSchema: z.object({ characterId: positiveSafeInteger }),
+      outputSchema: toolOutputSchemas.select_eve_character,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -378,6 +386,7 @@ export function createEveServer(
         limit: z.number().int().min(1).max(100).default(20),
         offset: z.number().int().min(0).default(0),
       }),
+      outputSchema: toolOutputSchemas.search_esi_operations,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     ({ query, tag, authenticated, limit, offset }) => {
@@ -418,6 +427,7 @@ export function createEveServer(
       description:
         "Inspect one read-only EVE Online ESI operation found with search_esi_operations before calling call_esi. Return its exact path/query/header parameters, request-body schema, OAuth scopes, cache hints and rate-limit metadata.",
       inputSchema: z.object({ operationId: z.string().min(1) }),
+      outputSchema: toolOutputSchemas.get_esi_operation,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     ({ operationId }) => {
@@ -475,6 +485,7 @@ export function createEveServer(
             "JSON body for explicitly audited, semantically read-only bulk lookup POST operations",
           ),
       }),
+      outputSchema: toolOutputSchemas.call_esi,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ operationId, actingCharacterId, path, query, headers, body }) => {
@@ -519,6 +530,7 @@ export function createEveServer(
           (value) => (value.names === undefined) !== (value.ids === undefined),
           "Supply exactly one of names or ids",
         ),
+      outputSchema: toolOutputSchemas.resolve_eve_entities,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async (input) => {
@@ -572,6 +584,7 @@ export function createEveServer(
             ),
         })
         .strict(),
+      outputSchema: toolOutputSchemas.get_character_context,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ characterId, sections }) => {
@@ -607,6 +620,7 @@ export function createEveServer(
           maxPages: z.number().int().min(1).max(10).default(3),
         })
         .strict(),
+      outputSchema: toolOutputSchemas.get_market_snapshot,
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ regionId, typeId, locationId, maxPages }) => {

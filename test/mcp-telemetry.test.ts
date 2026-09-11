@@ -10,6 +10,8 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { createMcpHandler, type Transport } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { ObservedMcpServer } from "../src/mcp-telemetry.js";
+import { projectOutput } from "../src/diagnostic-policy.js";
+import { toolOutputSchemas } from "../src/tool-output-schemas.js";
 import {
   withTracer,
   withTelemetry,
@@ -62,6 +64,80 @@ function modernRequest(
 afterAll(() => {
   context.disable();
   manager.disable();
+});
+it("does not expose malformed private output values in SDK errors or telemetry", async () => {
+  const sentinel = "private-output-validation-canary";
+  const exporter = new InMemorySpanExporter();
+  const provider = new BasicTracerProvider({
+    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  });
+  const server = new ObservedMcpServer({ name: "test", version: "1" });
+  const client = new Client({ name: "test", version: "1" });
+  const malformed = {
+    characters: [
+      { characterId: 42, characterName: sentinel, scopes: sentinel },
+    ],
+    defaultCharacterId: 42,
+    legacyCredentialPendingMigration: false,
+    browserAuthorizationAvailable: true,
+  };
+  const handler = vi.fn(() =>
+    withSpan("eve.fixture.domain", projectOutput(malformed), () => ({
+      content: [{ type: "text" as const, text: JSON.stringify(malformed) }],
+      structuredContent: malformed,
+    })),
+  );
+  server.registerTool(
+    "list_eve_characters",
+    { outputSchema: toolOutputSchemas.list_eve_characters },
+    handler,
+  );
+  const [outbound, inbound] = InMemoryTransport.createLinkedPair();
+  try {
+    await withTracer(provider.getTracer("test"), () => server.connect(inbound));
+    await client.connect(outbound);
+    await client.listTools();
+    const result = await client.callTool({ name: "list_eve_characters" });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("Output validation error"),
+    });
+    expect(JSON.stringify(result)).not.toContain(sentinel);
+    expect(JSON.stringify(result).length).toBeLessThan(2048);
+    const roots = () =>
+      exporter
+        .getFinishedSpans()
+        .filter((span) => span.name === "tools/call list_eve_characters");
+    await vi.waitFor(() => {
+      expect(roots()).toHaveLength(1);
+    });
+    expect(roots()[0]?.attributes["eve.outcome"]).toBe("error");
+    expect(roots()[0]?.status.code).toBe(SpanStatusCode.ERROR);
+    expect(
+      exporter
+        .getFinishedSpans()
+        .some((span) => span.name === "eve.fixture.domain"),
+    ).toBe(true);
+    expect(
+      JSON.stringify(
+        exporter
+          .getFinishedSpans()
+          .map(({ name, attributes, events, status }) => ({
+            name,
+            attributes,
+            events,
+            status,
+          })),
+      ),
+    ).not.toContain(sentinel);
+  } finally {
+    await client.close();
+    await server.close();
+    await provider.shutdown();
+  }
 });
 it.each(["json", "sse"] as const)(
   "classifies real modern %s terminal sends before normal close cleanup",

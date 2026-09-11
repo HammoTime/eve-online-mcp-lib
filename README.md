@@ -16,6 +16,8 @@ independently published npm package. Licensed AGPL-3.0-only; extracted from
 - `src/auth.ts` and `src/token-identity.ts` provide token contracts, refresh and
   rotation callbacks, scope inspection, and verified EVE SSO identities.
 - `src/server.ts` registers transport-independent MCP tools/resources/prompts.
+- `src/tool-output-schemas.ts` describes the structured results of the 13 core
+  tools, including host authorization, partial workflows and source metadata.
 - Skill catalogs, dependency graphs, planning, entity resolution, character
   context and market snapshots are shared here.
 
@@ -66,6 +68,52 @@ rotation callback in authenticated applications.
 `StaticDataSource.initialize()` returns one validated `SkillCatalog` and its
 freshness status for a plan. The hosted application supplies the D1 adapter,
 full-SDE import workflow and four-hour ETag check.
+
+## Tool output contracts
+
+All 13 core tools advertise an `outputSchema` in `tools/list`. These are success
+contracts for the existing `structuredContent` object, not new result wrappers.
+Every schema explicitly has an object root, including the alternative local and
+hosted authorization results and the skill planner's target-selection results.
+This prevents the SDK's older-protocol projection from adding a `{ result: ... }`
+envelope. The optional `render_eve_map` extension retains its separate schema.
+
+The schemas describe character lists, target candidates, dependency graphs,
+training plans, operation discovery/invocation metadata, entity matches,
+character sections and bounded market aggregates. `call_esi.data` and successful
+character-section data accept any JSON value, including arrays, scalar wallet
+balances, strings (also used for non-JSON upstream text) and null. Upstream JSON
+schemas, rate-limit extensions and host refresh progress are also JSON-valued,
+not restricted to a guessed ESI payload shape. Source freshness, nullable page
+counts, pagination next-call arguments, warnings and caveats are retained.
+
+Static-data status belongs to the host adapter. Its known fields are typed but
+optional; additional JSON status fields are allowed. Local cache paths/counts
+are not required from hosted adapters, and hosted `checkedAt` can be null.
+Local authorization returns the same character-list object as list/select;
+hosted authorization returns `status: "authorization_required"`, a browser URL,
+the requested character ID and a message, without claiming consent completed.
+
+`isError: true` results keep the existing error body; the SDK skips success-schema
+validation for those results. A wholly failed character context is also a tool
+error. Partial character contexts, incomplete market snapshots and
+`needs_target_selection` plans are **not** tool errors and satisfy their success
+contracts. Always inspect section errors, completeness and freshness before
+treating a response as evidence. Output schemas do not change access controls,
+upstream response validation or diagnostic capture policy.
+
+Core handlers still return their pretty-printed JSON text fallback, identical to
+`JSON.stringify(structuredContent, null, 2)`. SDK input/output validation failures
+remain SDK-generated text errors. Diagnostic and hosted OAuth challenge metadata
+remain on the MCP result's `_meta`, outside the output schema.
+Contract tests use the actual SDK over legacy in-memory transports and a modern
+Streamable HTTP client connected to the SDK's per-request HTTP handler through
+an in-process fetch adapter. They validate the advertised JSON Schemas as well
+as the Zod contracts, and check malformed outputs and unchanged text/error
+delivery across legacy and modern protocol revisions.
+They also sweep every pinned read-only operation through search and inspection,
+and check that SDK output-validation errors and telemetry do not echo malformed
+private result values.
 
 ## OpenTelemetry and hosted authorization
 
