@@ -29,6 +29,7 @@ const SERVICES = createContextKey("eve.telemetry.services");
 const ERRORS = createContextKey("eve.telemetry.errors");
 const ACTIVITIES = createContextKey("eve.telemetry.activities");
 const CANCELLATION = createContextKey("eve.telemetry.cancellation");
+const DETACHED = createContextKey("eve.telemetry.detached");
 const ERROR_CODES = new Set([
   "UNKNOWN_OPERATION",
   "VALIDATION_ERROR",
@@ -92,7 +93,16 @@ export function operationContext(
 export function cancellationSignal(): AbortSignal | undefined {
   return context.active().getValue(CANCELLATION) as AbortSignal | undefined;
 }
+/** Preserve tracing context for independently owned work, not request/host drains.
+ * The caller must handle rejection and track its own bounded wait. */
+export function withoutRequestTracking<T>(operation: () => T): T {
+  return context.with(
+    context.active().deleteValue(ACTIVITIES).setValue(DETACHED, true),
+    operation,
+  );
+}
 export function trackCompletion(completion: Promise<void>): void {
+  if (context.active().getValue(DETACHED)) return;
   (
     context.active().getValue(SERVICES) as TelemetryServices | undefined
   )?.trackCompletion?.(completion);

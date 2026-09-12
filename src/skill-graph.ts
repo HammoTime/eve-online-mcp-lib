@@ -1,6 +1,29 @@
 import { DiagnosticError } from "./diagnostic-error.js";
 import { attributes, withSpanSync } from "./telemetry.js";
-import { ROMAN_LEVELS, SkillCatalog, type Requirement } from "./skill-data.js";
+import {
+  ROMAN_LEVELS,
+  type SkillReader,
+  type Requirement,
+  requirementSchema,
+  typeId,
+} from "./skill-data.js";
+
+function validateInputs(
+  nodes: Requirement[],
+  baseline: ReadonlyMap<number, number>,
+) {
+  if (nodes.length > 10_000 || baseline.size > 10_000)
+    throw new DiagnosticError(
+      "SKILL_GRAPH_LIMIT",
+      "Skill graph exceeds 10,000 nodes",
+    );
+  for (const node of nodes) requirementSchema.parse(node);
+  for (const [id, level] of baseline) {
+    typeId.parse(id);
+    if (!Number.isInteger(level) || level < 0 || level > 5)
+      throw new Error("Invalid baseline level");
+  }
+}
 
 export interface TrainingNode extends Requirement {
   key: string;
@@ -12,11 +35,12 @@ export const nodeKey = (skillId: number, level: number) =>
 
 /** Iterative ancestor closure + Kahn topological sort. O(V+E), no recursion limit. */
 export function buildSkillGraph(
-  catalog: SkillCatalog,
+  catalog: SkillReader,
   targets: Requirement[],
   baseline: ReadonlyMap<number, number> = new Map(),
 ) {
   return withSpanSync("eve.buildSkillGraph", () => {
+    validateInputs(targets, baseline);
     attributes({
       "eve.input.target_count": targets.length,
       "eve.input.baseline_count": baseline.size,
@@ -108,11 +132,12 @@ export function buildSkillGraph(
 
 /** Separate validation pass against the source requirements, not the generated edges. */
 export function replayTraining(
-  catalog: SkillCatalog,
+  catalog: SkillReader,
   nodes: Requirement[],
   baseline: ReadonlyMap<number, number>,
 ) {
   return withSpanSync("eve.replayTraining", () => {
+    validateInputs(nodes, baseline);
     attributes({
       "eve.input.node_count": nodes.length,
       "eve.input.baseline_count": baseline.size,
@@ -137,7 +162,8 @@ export function replayTraining(
   });
 }
 
-export function trainingText(nodes: Requirement[], catalog: SkillCatalog) {
+export function trainingText(nodes: Requirement[], catalog: SkillReader) {
+  validateInputs(nodes, new Map());
   return nodes
     .map(
       (node) =>

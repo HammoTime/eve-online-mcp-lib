@@ -35,12 +35,17 @@ export async function* jsonLines(
 }
 
 const rawId = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-const groupSchema = z.object({ _key: rawId, categoryID: rawId });
-const typeSchema = z.object({
+export const groupSchema = z.object({ _key: rawId, categoryID: rawId });
+export const typeSchema = z.object({
   _key: rawId,
   groupID: rawId,
   published: z.boolean(),
-  name: z.object({ en: z.string() }),
+  name: z.object({
+    en: z
+      .string()
+      .max(2000)
+      .refine((value) => !value.includes("\0")),
+  }),
 });
 const dogmaSchema = z.object({
   _key: typeId,
@@ -48,6 +53,23 @@ const dogmaSchema = z.object({
     .array(z.object({ attributeID: typeId, value: z.number() }))
     .default([]),
 });
+
+export function decodeDogma(row: unknown) {
+  const type = dogmaSchema.parse(row);
+  const attributes = new Map<number, number>();
+  for (const attribute of type.dogmaAttributes) {
+    if (attributes.has(attribute.attributeID))
+      throw new Error("Duplicate SDE dogma attribute");
+    attributes.set(attribute.attributeID, attribute.value);
+  }
+  let requirements: StaticType["requirements"] = null;
+  try {
+    requirements = decodeRequirements(attributes);
+  } catch {
+    /* Malformed slots are unavailable, not an empty prerequisite list. */
+  }
+  return { id: type._key, requirements, rank: attributes.get(275) ?? null };
+}
 export const STATIC_DATA_FILES = [
   "groups.jsonl",
   "types.jsonl",
@@ -90,27 +112,10 @@ export async function parseStaticData(
         } else if (entry.name === "types.jsonl")
           rawTypes.push(typeSchema.parse(row));
         else {
-          const type = dogmaSchema.parse(row);
-          if (dogma.has(type._key))
+          const type = decodeDogma(row);
+          if (dogma.has(type.id))
             throw new Error("Duplicate SDE dogma type ID");
-          const attributes = new Map<number, number>();
-          for (const attribute of type.dogmaAttributes) {
-            if (attributes.has(attribute.attributeID))
-              throw new Error("Duplicate SDE dogma attribute");
-            attributes.set(attribute.attributeID, attribute.value);
-          }
-          // Only skill/ship prerequisites are relevant. Retain malformed rows as unavailable,
-          // so a malformed unrelated item cannot masquerade as having no requirements.
-          let requirements: StaticType["requirements"] = null;
-          try {
-            requirements = decodeRequirements(attributes);
-          } catch {
-            /* validated for selected types below */
-          }
-          dogma.set(type._key, {
-            requirements,
-            rank: attributes.get(275) ?? null,
-          });
+          dogma.set(type.id, type);
         }
       }
     }

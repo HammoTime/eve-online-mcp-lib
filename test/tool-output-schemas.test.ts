@@ -740,6 +740,7 @@ describe("core tool output contracts", () => {
       hasMore: true,
       nextCall: {
         operationId: "GetCharacterAssets",
+        actingCharacterId: 42,
         path: { character_id: 42 },
         query: { page: 2 },
         headers: {},

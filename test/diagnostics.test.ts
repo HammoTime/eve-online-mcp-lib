@@ -28,7 +28,8 @@ import { fixtureDocument } from "./fixtures.js";
 import { fixtureSource } from "./skill-fixtures.js";
 import { skillFixture } from "./skill-fixtures.js";
 import { createHash } from "node:crypto";
-import { DiagnosticCapture } from "../src/diagnostics.js";
+import { DiagnosticCapture, captureContext } from "../src/diagnostics.js";
+import { observedStaticData } from "../src/static-data.js";
 
 const manager = new AsyncLocalStorageContextManager().enable();
 context.setGlobalContextManager(manager);
@@ -37,6 +38,108 @@ afterAll(() => {
   manager.disable();
 });
 describe("MCP diagnostic evidence", () => {
+  it("marks failed public catalog acquisition partial with a fixed reason and no exception details", async () => {
+    const provider = new BasicTracerProvider();
+    const catalog = new OperationCatalog(fixtureDocument());
+    const captures: ReplayManifest[] = [];
+    const getAccessToken = vi.fn(() => Promise.resolve(undefined));
+    const initialize = vi
+      .fn()
+      .mockRejectedValue(
+        new Error(
+          "synthetic private cache path /private/operator/cache.sqlite",
+        ),
+      );
+    const saveCatalog = vi.fn();
+    const server = createEveServer(
+      catalog,
+      new EsiClient(catalog, { getAccessToken }),
+      {
+        identity: { name: "test", version: "1" },
+        staticData: { initialize },
+      },
+    );
+    const client = new Client({ name: "test", version: "1" });
+    const [outbound, inbound] = InMemoryTransport.createLinkedPair();
+    await withTracer(provider.getTracer("test"), () =>
+      withCaptureOptions(
+        {
+          versions: {
+            server: "1".repeat(40),
+            library: "2".repeat(40),
+            openapi: "3".repeat(64),
+          },
+          save: (capture) => {
+            captures.push(capture);
+          },
+          saveCatalog,
+        },
+        () => server.connect(inbound),
+      ),
+    );
+    try {
+      await client.connect(outbound);
+      const result = await client.callTool({
+        name: "get_skill_dependencies",
+        arguments: { target: { typeId: 400 } },
+      });
+      expect(result.isError).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(captures).toHaveLength(1);
+      expect(captures[0]).toMatchObject({
+        status: "partial",
+        reasons: ["static_catalog_unavailable"],
+        catalogs: [],
+        dependencies: [],
+        request: {
+          tool: "get_skill_dependencies",
+          arguments: { target: { typeId: 400 } },
+        },
+      });
+      expect(JSON.stringify(captures)).not.toMatch(
+        /synthetic private cache path|\/private\/operator\/cache.sqlite/u,
+      );
+      expect(initialize).toHaveBeenCalledOnce();
+      expect(saveCatalog).not.toHaveBeenCalled();
+      expect(getAccessToken).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+      await provider.shutdown();
+    }
+  });
+  it("marks query-only snapshots partial without capturing private lookup footprints and releases on observation failure", async () => {
+    const snapshot = await fixtureSource().initialize();
+    const saveCatalog = vi.fn();
+    const capture = new DiagnosticCapture(
+      { versions: {}, save: () => undefined, saveCatalog },
+      { method: "tools/call", tool: "generate_skill_plan", arguments: {} },
+      true,
+    );
+    const incomplete = vi.spyOn(capture, "incomplete");
+    const artifact = vi
+      .spyOn(snapshot.catalog, "diagnosticCatalog", "get")
+      .mockReturnValue(undefined);
+    const release = vi.fn();
+    const source = observedStaticData({
+      initialize: () => Promise.resolve({ ...snapshot, release }),
+    });
+    const result = await context.with(captureContext(capture), () =>
+      source.initialize(),
+    );
+    result.catalog.skill(100);
+    expect(incomplete).toHaveBeenCalledWith("catalog_artifact_unavailable");
+    expect(saveCatalog).not.toHaveBeenCalled();
+    expect(capture.catalogs).toEqual([]);
+    expect(capture.dependencies).toEqual([]);
+    result.release?.();
+    artifact.mockImplementationOnce(() => {
+      throw new Error("synthetic observation failure");
+    });
+    await expect(source.initialize()).rejects.toThrow("observation failure");
+    expect(release).toHaveBeenCalledTimes(2);
+    artifact.mockRestore();
+  });
   it("snapshots public static data and replays the dependency graph without downloading SDE", async () => {
     const provider = new BasicTracerProvider();
     const document = fixtureDocument(),

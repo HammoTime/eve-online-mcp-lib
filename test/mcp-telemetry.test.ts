@@ -12,6 +12,11 @@ import { z } from "zod";
 import { ObservedMcpServer } from "../src/mcp-telemetry.js";
 import { projectOutput } from "../src/diagnostic-policy.js";
 import { toolOutputSchemas } from "../src/tool-output-schemas.js";
+import { EsiClient } from "../src/esi-client.js";
+import { OperationCatalog } from "../src/openapi.js";
+import { createEveServer } from "../src/server.js";
+import { fixtureDocument } from "./fixtures.js";
+import { fixtureSource } from "./skill-fixtures.js";
 import {
   withTracer,
   withTelemetry,
@@ -35,6 +40,7 @@ function modernRequest(
   id: number,
   signal?: AbortSignal,
   name = "get_market_snapshot",
+  args: Record<string, unknown> = {},
 ) {
   return new Request("https://example.test/mcp", {
     method: "POST",
@@ -55,7 +61,7 @@ function modernRequest(
           "io.modelcontextprotocol/clientCapabilities": {},
         },
         name,
-        arguments: {},
+        arguments: args,
       },
     }),
     ...(signal ? { signal } : {}),
@@ -65,6 +71,192 @@ afterAll(() => {
   context.disable();
   manager.disable();
 });
+
+it.each([
+  ["legacy", "cancel"],
+  ["json", "cancel"],
+  ["sse", "cancel"],
+  ["legacy", "close"],
+  ["json", "close"],
+  ["sse", "close"],
+] as const)(
+  "completes real %s MCP %s while ESI refresh remains unsettled",
+  async (mode, action) => {
+    const exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    const completions: Promise<void>[] = [];
+    const manifests: ReplayManifest[] = [];
+    const completed = vi.fn();
+    const held = deferred();
+    const started = deferred();
+    const network = vi.fn<typeof fetch>();
+    const catalog = new OperationCatalog(fixtureDocument());
+    const esi = new EsiClient(
+      catalog,
+      {
+        getAccessToken: () =>
+          withSpan("eve.auth.refresh", {}, async () => {
+            started.resolve();
+            await held.promise;
+            throw new Error("private-refresh-failure-canary");
+          }),
+      },
+      { fetchImplementation: network },
+    );
+    const createServer = () =>
+      createEveServer(catalog, esi, {
+        identity: { name: "test", version: "1" },
+        staticData: fixtureSource(),
+      });
+    function observe<T>(operation: () => T): T {
+      return withTelemetry(
+        {
+          tracer: provider.getTracer("test"),
+          trackCompletion: (completion) => {
+            completions.push(completion);
+            void completion.then(() => {
+              completed();
+            });
+          },
+        },
+        () =>
+          withCaptureOptions(
+            {
+              versions: {},
+              save: (manifest) => {
+                manifests.push(manifest);
+              },
+            },
+            operation,
+          ),
+      );
+    }
+    const connections: { close(): Promise<void> }[] = [];
+    const args = {
+      operationId: "GetCharacterAssets",
+      actingCharacterId: 42,
+      path: { character_id: 42 },
+    };
+    let receive: Promise<void> | undefined;
+    try {
+      if (mode === "legacy") {
+        const server = createServer();
+        const client = new Client({ name: "test", version: "1" });
+        connections.push(client, server);
+        const [outbound, inbound] = InMemoryTransport.createLinkedPair();
+        await observe(() => server.connect(inbound));
+        await client.connect(outbound);
+        await outbound.send({
+          jsonrpc: "2.0",
+          id: 500,
+          method: "tools/call",
+          params: { name: "call_esi", arguments: args },
+        });
+        await started.promise;
+        if (action === "close") await server.close();
+        else
+          await outbound.send({
+            jsonrpc: "2.0",
+            method: "notifications/cancelled",
+            params: { requestId: 500 },
+          });
+      } else {
+        const handler = createMcpHandler(createServer, {
+          responseMode: mode,
+          keepAliveMs: 0,
+        });
+        connections.push(handler);
+        const controller = new AbortController();
+        receive = observe(() =>
+          handler.fetch(
+            modernRequest(500, controller.signal, "call_esi", args),
+          ),
+        )
+          .then((response) => response.text())
+          .then(
+            (body) => {
+              expect(body).not.toContain("private-refresh-failure-canary");
+            },
+            () => undefined,
+          );
+        await started.promise;
+        if (action === "close") await handler.close();
+        else controller.abort();
+      }
+      let drained = false;
+      const drain = Promise.all(completions).then(() => {
+        drained = true;
+      });
+      await vi.waitFor(() => {
+        expect(drained).toBe(true);
+      });
+      await drain;
+      const roots = () =>
+        exporter
+          .getFinishedSpans()
+          .filter((span) => span.name === "tools/call call_esi");
+      expect(roots()).toHaveLength(1);
+      const outcome = action === "close" ? "error" : "cancelled";
+      expect(roots()[0]?.attributes["eve.outcome"]).toBe(outcome);
+      expect(roots()[0]?.status.code).toBe(
+        action === "close" ? SpanStatusCode.ERROR : SpanStatusCode.UNSET,
+      );
+      expect(manifests).toHaveLength(1);
+      expect(manifests[0]).toMatchObject({
+        status: "partial",
+        reasons: expect.arrayContaining([
+          action === "close" ? "transport_failure" : "cancelled",
+        ]),
+        expected: { "eve.outcome": outcome },
+      });
+      expect(network).not.toHaveBeenCalled();
+      expect(
+        exporter
+          .getFinishedSpans()
+          .some((span) => span.name === "eve.auth.refresh"),
+      ).toBe(false);
+      const completionCount = completions.length;
+      expect(completed).toHaveBeenCalledTimes(completionCount);
+      for (const connection of connections) await connection.close();
+      await receive;
+      held.resolve();
+      await vi.waitFor(() => {
+        expect(
+          exporter
+            .getFinishedSpans()
+            .some((span) => span.name === "eve.auth.refresh"),
+        ).toBe(true);
+      });
+      const refresh = exporter
+        .getFinishedSpans()
+        .find((span) => span.name === "eve.auth.refresh");
+      expect(refresh?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(completions).toHaveLength(completionCount);
+      expect(completed).toHaveBeenCalledTimes(completionCount);
+      expect(roots()).toHaveLength(1);
+      expect(manifests).toHaveLength(1);
+      expect(network).not.toHaveBeenCalled();
+      expect(
+        JSON.stringify({
+          manifests,
+          spans: exporter
+            .getFinishedSpans()
+            .map(({ attributes, events, status }) => ({
+              attributes,
+              events,
+              status,
+            })),
+        }),
+      ).not.toContain("private-refresh-failure-canary");
+    } finally {
+      held.resolve();
+      for (const connection of connections) await connection.close();
+      await provider.shutdown();
+    }
+  },
+);
 it("does not expose malformed private output values in SDK errors or telemetry", async () => {
   const sentinel = "private-output-validation-canary";
   const exporter = new InMemorySpanExporter();

@@ -65,9 +65,23 @@ this library does not provide persistent Workers caching or hosted sessions.
 Refresh providers must receive an identity-verification callback and a durable
 rotation callback in authenticated applications.
 
-`StaticDataSource.initialize()` returns one validated `SkillCatalog` and its
-freshness status for a plan. The hosted application supplies the D1 adapter,
-full-SDE import workflow and four-hour ETag check.
+`StaticDataSource.initialize()` returns a build-consistent `SkillReader`, freshness
+status and an optional idempotent `release()` callback. Every caller, including
+status-only/background initialization, must release in `finally`. `SkillCatalog`
+is the in-memory implementation retained for hosted adapters, fixtures and replay;
+local adapters can provide bounded SQLite lookups without exposing a full catalog.
+Name interpretation, prerequisite validation and planning remain shared. The hosted
+application supplies its own D1 adapter, full-SDE workflow and refresh policy.
+
+ESI defaults are 128 cache entries, 20,000,000 serialized UTF-8 cache bytes, 64
+tracked wire requests, 64 waiters per request and a 30-second wire/body deadline.
+Positive finite integer constructor options can change these bounds. Identical GETs
+share only after each caller authorizes, with independent cancellation and isolated
+returned objects. POSTs never coalesce. Protected continuation metadata is rebuilt
+for each caller, preserving explicit acting-character selection. Hosts must supply
+working asynchronous context propagation (or an explicit request signal) even when
+trace export is disabled. Abandoned authorization work is detached from request
+completion so durable refresh persistence can finish without blocking cancellation.
 
 ## Tool output contracts
 

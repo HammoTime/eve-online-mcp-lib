@@ -155,7 +155,12 @@ export function createEveServer(
         { "gen_ai.tool.name": "initialize_static_data" },
         async () => {
           try {
-            return textResult((await staticData.initialize(refresh)).status);
+            const snapshot = await staticData.initialize(refresh);
+            try {
+              return textResult(snapshot.status);
+            } finally {
+              snapshot.release?.();
+            }
           } catch (error) {
             return errorResult(error);
           }
@@ -179,13 +184,18 @@ export function createEveServer(
         { "gen_ai.tool.name": "resolve_skill_plan_targets" },
         async () => {
           try {
-            const { catalog, status } = await staticData.initialize();
-            return textResult({
-              staticData: status,
-              targets: (targets ?? (target === undefined ? [] : [target])).map(
-                (value) => catalog.resolve(value),
-              ),
-            });
+            const snapshot = await staticData.initialize();
+            const { catalog, status } = snapshot;
+            try {
+              return textResult({
+                staticData: status,
+                targets: (
+                  targets ?? (target === undefined ? [] : [target])
+                ).map((value) => catalog.resolve(value)),
+              });
+            } finally {
+              snapshot.release?.();
+            }
           } catch (error) {
             return errorResult(error);
           }

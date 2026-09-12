@@ -2,6 +2,7 @@ import {
   attributes,
   cancellationSignal,
   diagnostic,
+  withoutRequestTracking,
   withSpan,
   withSpanSync,
 } from "./telemetry.js";
@@ -117,8 +118,63 @@ export interface EsiAuthorization {
 
 interface CacheEntry {
   expiresAt: number;
-  response: EsiResponse;
+  response: Omit<EsiResponse, "pagination">;
   byteLength: number;
+  cacheBytes: number;
+}
+
+interface WireResponse {
+  response: Response;
+  raw: string;
+  byteLength: number;
+  fetchedAt: number;
+}
+
+interface InFlightRequest {
+  controller: AbortController;
+  waiters: Set<{
+    resolve: (response: WireResponse) => void;
+    reject: (error: unknown) => void;
+  }>;
+  settled: boolean;
+}
+
+const DEFAULT_LIMITS = {
+  maxResponseBytes: 5_000_000,
+  maxCacheEntries: 128,
+  maxCacheBytes: 20_000_000,
+  maxInFlightRequests: 64,
+  maxWaitersPerRequest: 64,
+  requestTimeoutMs: 30_000,
+};
+
+function cancelled(): DOMException {
+  return new DOMException("Operation cancelled", "AbortError");
+}
+
+// Stop waiting even when a host token provider or fetch implementation ignores abort.
+function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(cancelled());
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(
+          error instanceof Error ? error : new Error("ESI operation failed"),
+        );
+      },
+    );
+  });
 }
 
 const RESPONSE_HEADERS = [
@@ -140,19 +196,28 @@ const RESPONSE_HEADERS = [
 async function readBoundedBody(
   response: Response,
   limit: number,
+  signal: AbortSignal,
 ): Promise<string> {
   if (!response.body) return "";
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let bytes = 0,
     text = "";
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
+    if (signal.aborted) {
+      cancel();
+      throw cancelled();
+    }
     for (;;) {
-      const chunk = await reader.read();
+      const chunk = await waitFor(reader.read(), signal);
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > limit) {
-        await reader.cancel();
+        cancel();
         throw new EsiRequestError(
           "ESI response exceeds the byte safety limit",
           response.status,
@@ -165,6 +230,7 @@ async function readBoundedBody(
     attributes({ "eve.output.bytes": bytes });
     return text + decoder.decode();
   } catch (cause) {
+    if (signal.aborted) throw cancelled();
     if (cause instanceof EsiRequestError) throw cause;
     throw new EsiRequestError(
       "ESI response body could not be read",
@@ -173,6 +239,7 @@ async function readBoundedBody(
       { code: "NETWORK_ERROR", retryable: true },
     );
   } finally {
+    signal.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
 }
@@ -433,6 +500,10 @@ function validPageCount(value: string | undefined): number | null {
 
 export class EsiClient {
   private readonly cache = new Map<string, CacheEntry>();
+  private cacheBytes = 0;
+  private readonly inFlight = new Map<string, InFlightRequest>();
+  private activeRequests = 0;
+  private readonly limits: typeof DEFAULT_LIMITS;
   private readonly authorizationTokens = new WeakMap<object, string>();
   private readonly responseSizes = new WeakMap<EsiResponse, number>();
   private readonly baseUrl: string;
@@ -443,11 +514,37 @@ export class EsiClient {
     private readonly options: {
       fetchImplementation?: typeof fetch;
       userAgent?: string;
+      /** UTF-8 response body limit; default 5,000,000 bytes. */
       maxResponseBytes?: number;
+      /** LRU cache budgets, including serialized metadata; defaults 128 / 20,000,000 bytes. */
+      maxCacheEntries?: number;
+      maxCacheBytes?: number;
+      /** Active wire requests / callers per shared GET; both default to 64. */
+      maxInFlightRequests?: number;
+      maxWaitersPerRequest?: number;
+      /** Independent wire deadline, including streaming; default 30,000 ms. */
+      requestTimeoutMs?: number;
+      /** Host request context fallback when OTel context is unavailable. */
+      getRequestSignal?: () => AbortSignal | undefined;
       baseUrl?: string;
       clock?: () => Date;
     } = {},
   ) {
+    this.limits = { ...DEFAULT_LIMITS };
+    for (const name of Object.keys(
+      DEFAULT_LIMITS,
+    ) as (keyof typeof DEFAULT_LIMITS)[]) {
+      const { [name]: value = DEFAULT_LIMITS[name] } = options;
+      if (!Number.isSafeInteger(value) || value <= 0)
+        throw new RangeError(
+          `Invalid ESI client configuration: ${name} must be a positive safe integer`,
+        );
+      this.limits[name] = value;
+    }
+    if (this.limits.requestTimeoutMs > 2_147_483_647)
+      throw new RangeError(
+        "Invalid ESI client configuration: requestTimeoutMs must not exceed 2147483647",
+      );
     this.baseUrl = options.baseUrl ?? "https://esi.evetech.net";
     const parsed = new URL(this.baseUrl);
     if (
@@ -463,7 +560,10 @@ export class EsiClient {
   async authorize(
     requiredScopes: string[],
     characterId?: number,
+    signal?: AbortSignal,
   ): Promise<EsiAuthorization> {
+    signal = this.requestSignal(signal);
+    if (signal?.aborted) throw cancelled();
     return withSpan(
       "eve.esi-client.authorize",
       {
@@ -481,8 +581,14 @@ export class EsiClient {
         if (scopes.length === 0) return { authorizationContext: "esi" };
         let token: string | undefined;
         try {
-          token = await this.tokenProvider.getAccessToken(scopes, characterId);
+          token = await waitFor(
+            withoutRequestTracking(() =>
+              this.tokenProvider.getAccessToken(scopes, characterId),
+            ),
+            signal,
+          );
         } catch (error) {
+          if (signal?.aborted) throw cancelled();
           throw new EsiRequestError(
             error instanceof Error
               ? error.message
@@ -502,6 +608,7 @@ export class EsiClient {
             },
           );
         }
+        if (signal?.aborted) throw cancelled();
         const checkedToken = this.requireToken(token, scopes, characterId);
         const authorization: EsiAuthorization = { authorizationContext: "esi" };
         this.authorizationTokens.set(authorization, checkedToken);
@@ -520,7 +627,11 @@ export class EsiClient {
   async call(
     input: EsiCallInput,
     authorization?: EsiAuthorization,
+    signal?: AbortSignal,
   ): Promise<EsiResponse> {
+    signal = this.requestSignal(signal);
+    if (signal?.aborted) throw cancelled();
+    input = structuredClone(input);
     return withSpan("eve.esi-client.call", {}, async () => {
       const capture = activeCapture();
       const ordinal = capture?.next() ?? 0;
@@ -535,7 +646,7 @@ export class EsiClient {
         "eve.esi.path_template": operation.path,
         "eve.auth.required": operation.requiredScopes.length > 0,
         "eve.auth.scope_count": operation.requiredScopes.length,
-        "eve.limit.response_bytes": this.options.maxResponseBytes ?? 5_000_000,
+        "eve.limit.response_bytes": this.limits.maxResponseBytes,
       });
       const url = withSpanSync("eve.esi.validate_url", () =>
         this.buildUrl(operation, input.path ?? {}, input.query ?? {}),
@@ -584,26 +695,42 @@ export class EsiClient {
           "eve.auth.required": operation.requiredScopes.length > 0,
           "eve.auth.reused": authorization !== undefined,
         },
-        () => this.tokenFor(operation, authorization, characterId),
+        () =>
+          waitFor(
+            withoutRequestTracking(() =>
+              this.tokenFor(operation, authorization, characterId),
+            ),
+            signal,
+          ),
       );
+      if (signal?.aborted) throw cancelled();
       if (token) headers.set("authorization", `Bearer ${token}`);
-      const cacheHeaders = [...headers.entries()].filter(
-        ([name]) => name !== "authorization" && name !== "user-agent",
-      );
-      const credentialContext = token
-        ? Array.from(
-            new Uint8Array(
-              await crypto.subtle.digest(
-                "SHA-256",
-                new TextEncoder().encode(token),
+      // Hash the complete wire identity; no credentials or unbounded input keys are retained.
+      const cacheKey = Array.from(
+        new Uint8Array(
+          await waitFor(
+            crypto.subtle.digest(
+              "SHA-256",
+              new TextEncoder().encode(
+                JSON.stringify([
+                  operation.operationId,
+                  operation.method,
+                  url.href,
+                  [...headers.entries()],
+                  body ?? null,
+                ]),
               ),
             ),
-            (byte) => byte.toString(16).padStart(2, "0"),
-          ).join("")
-        : "public";
-      const cacheKey = `${operation.method}:${url.href}:${credentialContext}:${JSON.stringify(cacheHeaders)}`;
+            signal,
+          ),
+        ),
+        (byte) => byte.toString(16).padStart(2, "0"),
+      ).join("");
+      if (signal?.aborted) throw cancelled();
       const servedAt = this.now();
-      const cached = this.cache.get(cacheKey);
+      this.evictCache(servedAt);
+      const cached =
+        operation.method === "GET" ? this.cache.get(cacheKey) : undefined;
       diagnostic("eve.cache.lookup", {
         "eve.cache.hit": !!cached && cached.expiresAt > servedAt,
         "eve.cache.partition": token ? "protected" : "public",
@@ -611,18 +738,31 @@ export class EsiClient {
         ...(cached ? { "eve.cache.expires_at_ms": cached.expiresAt } : {}),
       });
       if (cached && cached.expiresAt > servedAt) {
+        this.cache.delete(cacheKey);
+        this.cache.set(cacheKey, cached);
         capture?.incomplete("initial_cache_state_required");
-        await capture?.add({
-          ordinal,
-          operationId: operation.operationId,
-          input: projected.value,
-          cached: true,
-          startedAt: servedAt,
-          fetchedAt: Date.parse(cached.response.freshness.fetchedAt),
-        });
+        await waitFor(
+          Promise.resolve(
+            capture?.add({
+              ordinal,
+              operationId: operation.operationId,
+              input: projected.value,
+              cached: true,
+              startedAt: servedAt,
+              fetchedAt: Date.parse(cached.response.freshness.fetchedAt),
+            }),
+          ),
+          signal,
+        );
+        if (signal?.aborted) throw cancelled();
         const result: EsiResponse = {
-          ...cached.response,
+          ...structuredClone(cached.response),
           cached: true,
+          pagination: this.paginationFor(
+            operation,
+            input,
+            cached.response.headers,
+          ),
           freshness: {
             ...cached.response.freshness,
             servedAt: new Date(servedAt).toISOString(),
@@ -641,70 +781,45 @@ export class EsiClient {
           "eve.dependency.attempt": 1,
         },
         async () => {
-          let response: Response;
-          const signal = cancellationSignal();
+          let wire: WireResponse;
           try {
-            response = await (this.options.fetchImplementation ?? fetch)(url, {
-              method: operation.method,
+            wire = await this.request(
+              cacheKey,
+              operation,
+              url,
               headers,
-              ...(signal ? { signal } : {}),
-              ...(body === undefined ? {} : { body }),
-            });
-          } catch (error) {
-            if (cancellationSignal()?.aborted)
-              throw new DOMException("Operation cancelled", "AbortError");
-            await capture?.add({
-              ordinal,
-              operationId: operation.operationId,
-              input: projected.value,
-              cached: false,
-              startedAt: servedAt,
-              fetchedAt: this.now(),
-              errorCode: "NETWORK_ERROR",
-            });
-            throw new EsiRequestError(
-              `ESI network request failed: ${error instanceof Error ? error.message : String(error)}`,
-              undefined,
-              undefined,
-              { code: "NETWORK_ERROR", retryable: true },
+              body,
+              signal,
             );
+          } catch (error) {
+            if (signal?.aborted) throw cancelled();
+            if (error instanceof EsiRequestError && error.status !== undefined)
+              attributes({ "http.response.status_code": error.status });
+            await waitFor(
+              Promise.resolve(
+                capture?.add({
+                  ordinal,
+                  operationId: operation.operationId,
+                  input: projected.value,
+                  cached: false,
+                  startedAt: servedAt,
+                  fetchedAt: this.now(),
+                  errorCode:
+                    error instanceof EsiRequestError
+                      ? error.code
+                      : "NETWORK_ERROR",
+                }),
+              ),
+              signal,
+            );
+            throw error;
           }
-          const contentLength = Number(
-            response.headers.get("content-length") ?? 0,
-          );
-          const limit = this.options.maxResponseBytes ?? 5_000_000;
+          if (signal?.aborted) throw cancelled();
+          const { response, raw, byteLength, fetchedAt } = wire;
           attributes({
             "http.response.status_code": response.status,
-            "eve.limit.response_bytes": limit,
+            "eve.limit.response_bytes": this.limits.maxResponseBytes,
           });
-          if (Number.isFinite(contentLength) && contentLength > limit) {
-            await response.body?.cancel();
-            throw new EsiRequestError(
-              `ESI response exceeds the ${limit} byte safety limit`,
-              response.status,
-              undefined,
-              { code: "RESPONSE_LIMIT", retryable: false },
-            );
-          }
-
-          const raw =
-            operation.method === "HEAD" ||
-            response.status === 204 ||
-            response.status === 304
-              ? ""
-              : await withSpan(
-                  "eve.esi.read_body",
-                  { "eve.limit.response_bytes": limit },
-                  () => readBoundedBody(response, limit),
-                );
-          const byteLength = new TextEncoder().encode(raw).byteLength;
-          if (byteLength > limit)
-            throw new EsiRequestError(
-              `ESI response exceeds the ${limit} byte safety limit`,
-              response.status,
-              undefined,
-              { code: "RESPONSE_LIMIT", retryable: false },
-            );
           let data: JsonValue | string | null = null;
           if (raw) {
             try {
@@ -718,7 +833,6 @@ export class EsiClient {
             }
           }
 
-          const fetchedAt = this.now();
           attributes({
             "http.response.body.size": byteLength,
             "eve.clock.unix_ms": fetchedAt,
@@ -735,19 +849,23 @@ export class EsiClient {
             if (!bodyAllowed) capture.incomplete("dependency_body_redacted");
             if (!safeHeaders.complete)
               capture.incomplete("dependency_headers_redacted");
-            await capture.add({
-              ordinal,
-              operationId: operation.operationId,
-              input: projected.value,
-              cached: false,
-              startedAt: servedAt,
-              fetchedAt,
-              status: response.status,
-              headers: safeHeaders.values,
-              ...(bodyAllowed ? { body: raw } : {}),
-              bodyBytes: byteLength,
-            });
+            await waitFor(
+              capture.add({
+                ordinal,
+                operationId: operation.operationId,
+                input: projected.value,
+                cached: false,
+                startedAt: servedAt,
+                fetchedAt,
+                status: response.status,
+                headers: safeHeaders.values,
+                ...(bodyAllowed ? { body: raw } : {}),
+                bodyBytes: byteLength,
+              }),
+              signal,
+            );
           }
+          if (signal?.aborted) throw cancelled();
           const responseHeaders = selectedHeaders(response.headers);
           const policy = cacheExpiry(response.headers, operation, fetchedAt);
           const modifiedAt = parseHttpDate(
@@ -808,7 +926,7 @@ export class EsiClient {
                     authenticatedCharacterId: token
                       ? (characterIdFromToken(token) ?? null)
                       : null,
-                    requiredScopes: operation.requiredScopes,
+                    requiredScopes: [...operation.requiredScopes],
                   }
                 : (data ?? undefined),
               {
@@ -827,11 +945,7 @@ export class EsiClient {
             policy.cacheable &&
             policy.expiresAt !== null
           )
-            this.cache.set(cacheKey, {
-              expiresAt: policy.expiresAt,
-              response: result,
-              byteLength,
-            });
+            this.storeCache(cacheKey, policy.expiresAt, result, byteLength);
           return result;
         },
         SpanKind.CLIENT,
@@ -841,6 +955,234 @@ export class EsiClient {
 
   private now(): number {
     return (this.options.clock?.() ?? new Date()).getTime();
+  }
+
+  private requestSignal(signal?: AbortSignal): AbortSignal | undefined {
+    const signals = [
+      signal,
+      cancellationSignal(),
+      this.options.getRequestSignal?.(),
+    ].filter((value): value is AbortSignal => value !== undefined);
+    return signals.length ? AbortSignal.any(signals) : undefined;
+  }
+
+  private evictCache(now: number): void {
+    for (const [key, entry] of this.cache) {
+      if (entry.expiresAt > now) continue;
+      this.cache.delete(key);
+      this.cacheBytes -= entry.cacheBytes;
+    }
+  }
+
+  private storeCache(
+    key: string,
+    expiresAt: number,
+    result: EsiResponse,
+    byteLength: number,
+  ): void {
+    const now = this.now();
+    this.evictCache(now);
+    if (expiresAt <= now) return;
+    // Continuations belong to callers, never to a shared cache entry.
+    const response = {
+      operationId: result.operationId,
+      status: result.status,
+      url: result.url,
+      cached: false,
+      headers: result.headers,
+      data: result.data,
+      freshness: result.freshness,
+    };
+    const cacheBytes = new TextEncoder().encode(
+      key + JSON.stringify(response),
+    ).byteLength;
+    if (cacheBytes > this.limits.maxCacheBytes) return;
+    const previous = this.cache.get(key);
+    if (previous) {
+      this.cache.delete(key);
+      this.cacheBytes -= previous.cacheBytes;
+    }
+    while (
+      this.cache.size >= this.limits.maxCacheEntries ||
+      this.cacheBytes + cacheBytes > this.limits.maxCacheBytes
+    ) {
+      const oldest = this.cache.entries().next().value;
+      if (!oldest) break;
+      this.cache.delete(oldest[0]);
+      this.cacheBytes -= oldest[1].cacheBytes;
+    }
+    this.cache.set(key, {
+      expiresAt,
+      response: structuredClone(response),
+      byteLength,
+      cacheBytes,
+    });
+    this.cacheBytes += cacheBytes;
+  }
+
+  private async request(
+    key: string,
+    operation: OperationDescriptor,
+    url: URL,
+    headers: Headers,
+    body: string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<WireResponse> {
+    if (signal?.aborted) throw cancelled();
+    let flight =
+      operation.method === "GET" ? this.inFlight.get(key) : undefined;
+    if (!flight) {
+      if (this.activeRequests >= this.limits.maxInFlightRequests)
+        throw new EsiRequestError(
+          "ESI concurrent request safety limit reached",
+          undefined,
+          undefined,
+          { code: "RESPONSE_LIMIT", retryable: false },
+        );
+      const controller = new AbortController();
+      const created: InFlightRequest = {
+        controller,
+        waiters: new Set(),
+        settled: false,
+      };
+      flight = created;
+      this.activeRequests++;
+      if (operation.method === "GET") this.inFlight.set(key, created);
+      const timer = setTimeout(() => {
+        controller.abort(
+          new EsiRequestError(
+            "ESI request deadline exceeded",
+            undefined,
+            undefined,
+            { code: "NETWORK_ERROR", retryable: true },
+          ),
+        );
+      }, this.limits.requestTimeoutMs);
+      const release = () => {
+        if (created.settled) return;
+        created.settled = true;
+        clearTimeout(timer);
+        controller.signal.removeEventListener("abort", release);
+        this.activeRequests--;
+        if (this.inFlight.get(key) === created) this.inFlight.delete(key);
+      };
+      controller.signal.addEventListener("abort", release, { once: true });
+      const work = async (): Promise<WireResponse> => {
+        const limit = this.limits.maxResponseBytes;
+        try {
+          const fetching = (this.options.fetchImplementation ?? fetch)(url, {
+            method: operation.method,
+            headers,
+            signal: controller.signal,
+            ...(body === undefined ? {} : { body }),
+          });
+          // A non-cooperative fetch may resolve after its last caller has gone.
+          void fetching.then(
+            (response) => {
+              if (controller.signal.aborted)
+                void response.body?.cancel().catch(() => undefined);
+            },
+            () => undefined,
+          );
+          const response = await waitFor(fetching, controller.signal);
+          const contentLength = Number(
+            response.headers.get("content-length") ?? 0,
+          );
+          if (Number.isFinite(contentLength) && contentLength > limit) {
+            void response.body?.cancel().catch(() => undefined);
+            throw new EsiRequestError(
+              `ESI response exceeds the ${limit} byte safety limit`,
+              response.status,
+              undefined,
+              { code: "RESPONSE_LIMIT", retryable: false },
+            );
+          }
+          const emptyBody =
+            operation.method === "HEAD" ||
+            response.status === 204 ||
+            response.status === 304;
+          if (emptyBody) void response.body?.cancel().catch(() => undefined);
+          const raw = emptyBody
+            ? ""
+            : await withSpan(
+                "eve.esi.read_body",
+                { "eve.limit.response_bytes": limit },
+                () => readBoundedBody(response, limit, controller.signal),
+              );
+          const byteLength = new TextEncoder().encode(raw).byteLength;
+          if (byteLength > limit)
+            throw new EsiRequestError(
+              `ESI response exceeds the ${limit} byte safety limit`,
+              response.status,
+              undefined,
+              { code: "RESPONSE_LIMIT", retryable: false },
+            );
+          if (controller.signal.aborted) throw cancelled();
+          return { response, raw, byteLength, fetchedAt: this.now() };
+        } catch (error) {
+          if (controller.signal.aborted) throw controller.signal.reason;
+          if (error instanceof EsiRequestError) throw error;
+          throw new EsiRequestError(
+            "ESI network request failed",
+            undefined,
+            undefined,
+            { code: "NETWORK_ERROR", retryable: true },
+          );
+        }
+      };
+      void work().then(
+        (response) => {
+          release();
+          for (const waiter of created.waiters) waiter.resolve(response);
+        },
+        (error: unknown) => {
+          release();
+          for (const waiter of created.waiters) waiter.reject(error);
+        },
+      );
+    }
+    const shared = flight;
+    if (shared.waiters.size >= this.limits.maxWaitersPerRequest)
+      throw new EsiRequestError(
+        "ESI shared request waiter safety limit reached",
+        undefined,
+        undefined,
+        { code: "RESPONSE_LIMIT", retryable: false },
+      );
+    return new Promise<WireResponse>((resolve, reject) => {
+      const finish = () => {
+        signal?.removeEventListener("abort", abort);
+        shared.waiters.delete(waiter);
+        if (!shared.settled && shared.waiters.size === 0)
+          shared.controller.abort(cancelled());
+      };
+      const abort = () => {
+        finish();
+        reject(cancelled());
+      };
+      const waiter = {
+        resolve: (response: WireResponse) => {
+          finish();
+          resolve(response);
+        },
+        reject: (error: unknown) => {
+          finish();
+          reject(
+            error instanceof EsiRequestError
+              ? new EsiRequestError(
+                  error.message,
+                  error.status,
+                  structuredClone(error.details),
+                  { ...error.metadata },
+                )
+              : cancelled(),
+          );
+        },
+      };
+      shared.waiters.add(waiter);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+    });
   }
 
   private requireToken(
@@ -853,7 +1195,7 @@ export class EsiClient {
         "This operation requires EVE authentication.",
         401,
         {
-          requiredScopes,
+          requiredScopes: [...requiredScopes],
           ...(characterId === undefined ? {} : { characterId }),
         },
         { code: "AUTHENTICATION_REQUIRED", retryable: false },
@@ -907,7 +1249,7 @@ export class EsiClient {
           error instanceof Error ? error.message : "EVE authentication failed",
           error instanceof AuthenticationError ? 403 : 401,
           {
-            requiredScopes: operation.requiredScopes,
+            requiredScopes: [...operation.requiredScopes],
             ...(characterId === undefined ? {} : { characterId }),
             ...(error instanceof AuthenticationError ? error.details : {}),
           },
@@ -963,6 +1305,10 @@ export class EsiClient {
         hasMore === true
           ? {
               operationId: input.operationId,
+              ...(operation.requiredScopes.length > 0 &&
+              input.actingCharacterId !== undefined
+                ? { actingCharacterId: input.actingCharacterId }
+                : {}),
               ...(input.path ? { path: { ...input.path } } : {}),
               query: { ...input.query, [pageParameter.name]: currentPage + 1 },
               ...(input.headers

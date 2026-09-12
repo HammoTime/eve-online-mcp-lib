@@ -12,9 +12,44 @@ import {
   trainingText,
 } from "../src/skill-graph.js";
 import { skill, skillFixture } from "./skill-fixtures.js";
+import { toolOutputSchemas } from "../src/tool-output-schemas.js";
 
 describe("deterministic skill target resolution", () => {
   const catalog = new SkillCatalog(skillFixture());
+  it.each([2, 20, 21, 30])(
+    "reports truncation only beyond 20 folded-name matches (%s)",
+    (count) => {
+      const types = Array.from({ length: count }, (_, index) =>
+        skill(count - index, index % 2 ? "M\u00cdNING" : "m\u00edning"),
+      );
+      const result = new SkillCatalog(skillFixture(types)).resolve(
+        "m\u00edning",
+      );
+      expect(result).toEqual({
+        status: "ambiguous",
+        input: "m\u00edning",
+        candidates: [...types]
+          .sort((a, b) => a.id - b.id)
+          .slice(0, 20)
+          .map((type) => ({
+            typeId: type.id,
+            name: type.name,
+            categoryId: type.categoryId,
+          })),
+        ...(count > 20 ? { candidatesTruncated: true } : {}),
+      });
+      const output = { staticData: {}, targets: [result] };
+      expect(
+        toolOutputSchemas.resolve_skill_plan_targets.parse(output),
+      ).toEqual(output);
+      expect(
+        toolOutputSchemas.resolve_skill_plan_targets.safeParse({
+          ...output,
+          targets: [{ ...result, candidatesTruncated: "true" }],
+        }).success,
+      ).toBe(false);
+    },
+  );
   it.each(["Mining II", "mining 2", " MINING II "])(
     "resolves explicit skill levels: %s",
     (target) => {
@@ -208,5 +243,31 @@ describe("prerequisite DAG and replay", () => {
     ]);
     expect(graph.nodes).toHaveLength(3000);
     expect(graph.nodes[0]?.skillId).toBe(1);
+  });
+  it("bounds direct graph/replay/text inputs and validates even skipped baselines", () => {
+    const large = Array.from({ length: 10_001 }, () => ({
+      skillId: 100,
+      level: 1,
+    }));
+    for (const operation of [
+      () => buildSkillGraph(catalog, large),
+      () => replayTraining(catalog, large, new Map()),
+      () => trainingText(large, catalog),
+    ])
+      expect(operation).toThrow("10,000");
+    expect(() =>
+      buildSkillGraph(catalog, [{ skillId: 100, level: 6 }]),
+    ).toThrow();
+    expect(() => replayTraining(catalog, [], new Map([[100, 6]]))).toThrow(
+      "baseline",
+    );
+    expect(() => buildSkillGraph(catalog, [], new Map([[NaN, 1]]))).toThrow();
+    expect(() =>
+      replayTraining(
+        catalog,
+        [],
+        new Map(Array.from({ length: 10_001 }, (_, id) => [id + 1, 1])),
+      ),
+    ).toThrow("10,000");
   });
 });

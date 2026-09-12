@@ -66,6 +66,24 @@ async function connectedClient(
 }
 
 describe("EVE MCP server", () => {
+  it.each(["initialize_static_data", "resolve_skill_plan_targets"])(
+    "releases status/resolve snapshots for %s including failed resolution",
+    async (name) => {
+      const snapshot = await fixtureSource().initialize();
+      const release = vi.fn();
+      const client = await connectedClient(undefined, {
+        initialize: () => Promise.resolve({ ...snapshot, release }),
+      });
+      await client.callTool({
+        name,
+        arguments:
+          name === "initialize_static_data"
+            ? {}
+            : { target: { typeId: 400, level: 2 } },
+      });
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
   it("reports the installed package version during MCP initialization", async () => {
     const metadata = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),

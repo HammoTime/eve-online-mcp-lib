@@ -75,6 +75,41 @@ function requiredResponse(responses: EsiResponse[], index: number) {
 }
 
 describe("personalized deterministic skill planning", () => {
+  it("releases dependency snapshots on complete, selection, and graph-error paths", async () => {
+    for (const targets of [
+      ["Mining II"],
+      ["not found"],
+      [{ typeId: 400, level: 2 }],
+    ]) {
+      const snapshot = await fixtureSource().initialize();
+      const release = vi.fn();
+      const { client } = plannerClient();
+      const planner = new SkillPlanner(
+        { initialize: () => Promise.resolve({ ...snapshot, release }) },
+        client,
+      );
+      if (typeof targets[0] === "object")
+        await expect(planner.dependencies(targets)).rejects.toThrow(
+          "Levels apply only",
+        );
+      else await planner.dependencies(targets);
+      expect(release).toHaveBeenCalledOnce();
+    }
+  });
+  it("rejects oversized direct targets before acquisition or authorization", async () => {
+    const source = fixtureSource();
+    const initialize = vi.spyOn(source, "initialize");
+    const { client, authorize } = plannerClient();
+    const planner = new SkillPlanner(source, client);
+    await expect(
+      planner.dependencies(Array(51).fill("Mining") as string[]),
+    ).rejects.toThrow();
+    await expect(
+      planner.generate({ characterId: NaN, targets: ["Mining"] }),
+    ).rejects.toThrow();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+  });
   it("subtracts permanently trained levels and partial SP once, preserving active-level evidence", async () => {
     const { planner, authorize, call } = plannerClient({
       skills: [observedSkill(100, 1, 1000, 0)],

@@ -119,6 +119,7 @@ const resolvedTarget = z.discriminatedUnion("status", [
     status: z.literal("ambiguous"),
     input: planTargetSchema,
     candidates: z.array(targetCandidate),
+    candidatesTruncated: z.boolean().optional(),
   }),
   z.object({
     status: z.literal("unsupported"),

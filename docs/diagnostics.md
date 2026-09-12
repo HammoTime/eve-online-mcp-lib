@@ -42,6 +42,13 @@ explicit reasons such as redacted input/body, missing cache state, cancellation,
 unsupported adapter, missing versions, transport failure or capture limits.
 Never relabel a partial capture as exact to make replay run.
 
+Query-backed static-data readers may not expose a complete catalog artifact.
+Those calls are explicitly partial (`catalog_artifact_unavailable`); the local
+SQLite adapter does not reconstruct the full catalog or capture personalized
+skill-lookup footprints as public evidence. Initialization failures are marked
+`static_catalog_unavailable`. Existing full-catalog snapshots and replay adapters
+remain supported, but these partial captures are not exact-replay inputs.
+
 Exact adapters cover `get_market_snapshot`, `call_esi` for the reviewed public
 regional market response policy, `get_skill_dependencies`, numeric-ID
 `resolve_skill_plan_targets`, and cached `initialize_static_data`. Public market

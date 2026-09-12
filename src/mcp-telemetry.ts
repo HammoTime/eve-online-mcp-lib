@@ -181,6 +181,8 @@ export class ObservedMcpServer extends McpServer {
         call.span.end();
         call.done();
       });
+      // Preserve the transport outcome before stopping leftover request work.
+      if (closed) call.controller.abort();
     };
     const cancel = (id: string | number) => {
       const call = pending.get(id);
