@@ -97,14 +97,6 @@
       }
     },
     "schemas": {
-      "AccessListID": {
-        "examples": [
-          1
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
-      },
       "AllianceID": {
         "examples": [
           99000001
@@ -238,22 +230,6 @@
         },
         "type": "array",
         "uniqueItems": true
-      },
-      "ArchetypeID": {
-        "examples": [
-          33
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
-      },
-      "AttributeID": {
-        "examples": [
-          209
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
       },
       "BloodlineID": {
         "examples": [
@@ -3823,14 +3799,6 @@
         ],
         "format": "date",
         "type": "string",
-        "x-common-model": "true"
-      },
-      "ConstellationID": {
-        "examples": [
-          20000001
-        ],
-        "format": "int64",
-        "type": "integer",
         "x-common-model": "true"
       },
       "ContractsPublicBidsContractIdGet": {
@@ -8103,14 +8071,6 @@
         },
         "type": "array"
       },
-      "DungeonID": {
-        "examples": [
-          12367
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
-      },
       "Error": {
         "properties": {
           "details": {
@@ -8905,14 +8865,6 @@
           "type": "object"
         },
         "type": "array"
-      },
-      "GroupID": {
-        "examples": [
-          1559
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
       },
       "IncursionsGet": {
         "items": {
@@ -9765,25 +9717,9 @@
         ],
         "type": "object"
       },
-      "PlanetID": {
-        "examples": [
-          40000002
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
-      },
       "RaceID": {
         "examples": [
           1
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
-      },
-      "RegionID": {
-        "examples": [
-          10000001
         ],
         "format": "int64",
         "type": "integer",
@@ -9797,15 +9733,6 @@
           "type": "integer"
         },
         "type": "array"
-      },
-      "ShipTreeGroupID": {
-        "description": "Ship tree group identifier.",
-        "examples": [
-          1559
-        ],
-        "format": "int64",
-        "type": "integer",
-        "x-common-model": "true"
       },
       "SolarSystemID": {
         "examples": [
@@ -11438,14 +11365,6 @@
           "group_id"
         ],
         "type": "object"
-      },
-      "UUID": {
-        "examples": [
-          "3868eaed-8278-4cb7-9709-7d7de9c20dc7"
-        ],
-        "format": "uuid",
-        "type": "string",
-        "x-common-model": "true"
       },
       "WarsGet": {
         "items": {
@@ -15279,7 +15198,7 @@
           "Location"
         ],
         "x-cache-age": 5,
-        "x-cache-mode": "ttl-based",
+        "x-cache-mode": "event-based",
         "x-client-cache-ttl": 5,
         "x-compatibility-date": "2020-01-01",
         "x-rate-limit": {
@@ -15287,8 +15206,7 @@
           "max-tokens": 1200,
           "window-size": "15m"
         },
-        "x-server-cache-mode": "ttl-based",
-        "x-server-cache-ttl": 5
+        "x-server-cache-mode": "event-based"
       }
     },
     "/characters/{character_id}/loyalty/points": {
@@ -16733,7 +16651,7 @@
           "Location"
         ],
         "x-cache-age": 60,
-        "x-cache-mode": "ttl-based",
+        "x-cache-mode": "event-based",
         "x-client-cache-ttl": 60,
         "x-compatibility-date": "2020-01-01",
         "x-rate-limit": {
@@ -16741,8 +16659,7 @@
           "max-tokens": 1200,
           "window-size": "15m"
         },
-        "x-server-cache-mode": "ttl-based",
-        "x-server-cache-ttl": 60
+        "x-server-cache-mode": "event-based"
       }
     },
     "/characters/{character_id}/orders": {
