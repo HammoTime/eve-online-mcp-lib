@@ -195,8 +195,8 @@ templates; a `routing` adapter additionally registers `plan_eve_route` and
 an optional PNG adapter. The runtime-independent planner owns exact directed
 shortest paths, stop optimization, replay and totals. The renderer accepts its
 opaque `routeId`, or a context `boundary` and `pointsOfInterest` without routes.
-Nonempty caller-supplied route arrays are rejected. Dense route maps fall back to
-server-rendered itinerary pages. See [architecture and limits](docs/route-planning.md).
+Nonempty caller-supplied route arrays are rejected. Crowded route maps retry on a larger padded canvas.
+Rendering failures preserve the complete route as text, without generating itinerary images. See [architecture and limits](docs/route-planning.md).
 The assistant must never compute, merge or replace route or skill plans; tool
 failures are reported, not worked around with scripts or model reasoning.
 Request `boundary: { kind: "neighborhood", center: "Jita", jumps: 1 }` directly

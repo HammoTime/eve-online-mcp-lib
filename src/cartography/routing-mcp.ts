@@ -13,7 +13,7 @@ import {
   renderRouteGuidance,
 } from "../route-guidance.js";
 import { compactOutputSchema } from "../output-schema.js";
-import { renderItinerary, itineraryPage } from "./itinerary.js";
+import { createRouteArtifact } from "./route-artifact.js";
 import { renderMap, renderPreparedMap } from "./render.js";
 import { mapRequestSchema, MapError, type MapRequest } from "./types.js";
 import type { CartographyServices } from "./service.js";
@@ -27,15 +27,6 @@ export const renderRequestSchema = z
       .describe(
         "Opaque routeId returned by plan_eve_route. Routes are loaded server-side; never supply or reconstruct system arrays.",
       ),
-    page: z
-      .number()
-      .int()
-      .min(0)
-      .max(10)
-      .optional()
-      .describe(
-        "Zero-based itinerary page returned by the server; same routeId for every page.",
-      ),
     boundary: mapRequestSchema.shape.boundary.optional(),
     pointsOfInterest: mapRequestSchema.shape.pointsOfInterest.optional(),
     routes: z
@@ -45,7 +36,7 @@ export const renderRequestSchema = z
       .describe(
         "Nonempty raw routes are forbidden. Use plan_eve_route and routeId.",
       ),
-    layout: z.enum(["atlas", "geographic", "itinerary"]).default("atlas"),
+    layout: mapRequestSchema.shape.layout,
     theme: mapRequestSchema.shape.theme,
     size: mapRequestSchema.shape.size,
     title: mapRequestSchema.shape.title,
@@ -59,9 +50,7 @@ export const renderRequestSchema = z
           request.pointsOfInterest !== undefined ||
           request.routes !== undefined
         : request.boundary === undefined ||
-          request.pointsOfInterest === undefined ||
-          request.page !== undefined ||
-          request.layout === "itinerary"
+          request.pointsOfInterest === undefined
     )
       ctx.addIssue({
         code: "custom",
@@ -71,13 +60,8 @@ export const renderRequestSchema = z
   });
 export const routePageSchema = z.object({
   routeId: routeIdSchema,
-  page: z.number().int(),
-  pageCount: z.number().int(),
   totalJumps: z.number().int(),
-  visitStart: z.number().int(),
-  visitEnd: z.number().int(),
   visitCount: z.number().int(),
-  nextPage: z.number().int().optional(),
 });
 export const routeResultSchema = z.union([
   z.object({
@@ -179,7 +163,7 @@ export function registerRoutePlanning(
             );
             signal.throwIfAborted();
             const plan = planRoute(graph, request, signal),
-              map = renderItinerary(plan);
+              map = createRouteArtifact(plan);
             signal.throwIfAborted();
             const artifact = await services.artifacts.put(map, plan.source);
             signal.throwIfAborted();
@@ -212,7 +196,7 @@ export function registerRoutePlanning(
               caveats: [
                 "Exact only for this complete static permanent-stargate snapshot and the requested constraints.",
                 "No live safety, wormhole/cyno routing, docking access or cargo-capacity guarantee.",
-                "Use this routeId unchanged. Rendering may return consecutive itinerary pages; never merge or redraw them.",
+                "Use this routeId unchanged. Crowded maps retry on a larger canvas; rendering failures preserve the route as text.",
               ],
               manifestUri: artifact.manifestUri,
             };
@@ -307,87 +291,78 @@ export async function prepareMapRender(
     );
   const plan = planResult.data;
   signal.throwIfAborted();
-  const page = input.page ?? 0,
-    pagination = itineraryPage(plan, page);
-  let map = renderItinerary(plan, page, input.theme, {
-    size: input.size,
-    ...(input.title === undefined ? {} : { title: input.title }),
-  });
+  const names = new Map(plan.systems.map((system) => [system.id, system.name]));
+  const details = {
+    routeId: input.routeId,
+    totalJumps: plan.totalJumps,
+    visitCount: plan.path.length,
+    waypointText: plan.stopSequence
+      .map((id) => routeValue(names.get(id)))
+      .join("\n"),
+    routeText: plan.path.map((id) => routeValue(names.get(id))).join("\n"),
+    source: plan.source,
+  };
+  if (plan.path.length > 100)
+    throw new MapError(
+      "ROUTE_MAP_LIMIT",
+      "This route exceeds the 100-visit map limit. The complete stored route is available as text.",
+      details,
+    );
   const request: MapRequest = mapRequestSchema.parse({
     boundary: { kind: "systems", systems: plan.systems.map((s) => s.id) },
     pointsOfInterest: [],
-    routes: [],
+    routes: [{ systems: plan.path, label: "Verified route" }],
     theme: input.theme,
     size: input.size,
     preview: input.preview,
-    layout: input.layout === "itinerary" ? "atlas" : input.layout,
+    layout: input.layout,
     ...(input.title ? { title: input.title } : {}),
   });
-  let fallback = "";
-  if (input.layout !== "itinerary" && input.page === undefined) {
-    if (plan.path.length > 100)
-      fallback = "The full route exceeds the atlas route bound.";
-    else
-      try {
-        const geoRequest = mapRequestSchema.parse({
-          ...request,
-          routes: [{ systems: plan.path, label: "Verified route" }],
-        });
-        const prepared =
-          "prepare" in services.data
-            ? await services.data.prepare(geoRequest, signal)
-            : await services.data.initialize();
-        signal.throwIfAborted();
-        if (
-          ["buildNumber", "sourceUrl", "releaseDate", "fetchedAt"].some(
-            (key) =>
-              prepared.status[key as keyof typeof prepared.status] !==
-              plan.source[key as keyof typeof plan.source],
-          )
-        )
-          fallback =
-            "The available geometry belongs to a different snapshot; the stored plan is unchanged.";
-        else
-          map = {
-            ...("scene" in prepared
-              ? renderPreparedMap(prepared.scene, geoRequest)
-              : renderMap(prepared.catalog, geoRequest)),
-            routePlan: plan,
-          };
-      } catch (error) {
-        signal.throwIfAborted();
-        if (!(error instanceof MapError) || error.code === "MAP_CANCELLED")
-          throw error;
-        fallback =
-          error.code === "MAP_TOO_DENSE"
-            ? "The geographic/atlas layout is too dense for readable labels."
-            : "Current atlas geometry is unavailable for this stored plan.";
-      }
+  try {
+    const prepared =
+      "prepare" in services.data
+        ? await services.data.prepare(request, signal)
+        : await services.data.initialize();
+    signal.throwIfAborted();
+    if (
+      ["buildNumber", "sourceUrl", "releaseDate", "fetchedAt"].some(
+        (key) =>
+          prepared.status[key as keyof typeof prepared.status] !==
+          plan.source[key as keyof typeof plan.source],
+      )
+    )
+      throw new MapError(
+        "ROUTE_GEOMETRY_CHANGED",
+        "The available geometry belongs to a different snapshot. Replan to render a current map; the stored route remains available as text.",
+        details,
+      );
+    const map = {
+      ...("scene" in prepared
+        ? renderPreparedMap(prepared.scene, request)
+        : renderMap(prepared.catalog, request)),
+      routePlan: plan,
+    };
+    return {
+      map,
+      status: plan.source,
+      request,
+      route: {
+        routeId: input.routeId,
+        totalJumps: plan.totalJumps,
+        visitCount: plan.path.length,
+      },
+    };
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!(error instanceof MapError) || error.code === "MAP_CANCELLED")
+      throw error;
+    if (error.code === "ROUTE_GEOMETRY_CHANGED") throw error;
+    throw new MapError(
+      error.code,
+      error.code === "MAP_TOO_DENSE"
+        ? "This route cannot be drawn readably even on the larger padded canvas. The complete stored route remains available as text."
+        : "Map geometry is unavailable for this stored route. The complete route remains available as text.",
+      details,
+    );
   }
-  map.layout.requested = input.layout;
-  if (fallback)
-    map.warnings.push({
-      code: "ROUTE_ITINERARY_FALLBACK",
-      message: `${fallback} The server rendered consecutive itinerary pages without altering any route steps.`,
-    });
-  const isItinerary = map.layout.used === "itinerary";
-  return {
-    map,
-    status: plan.source,
-    request,
-    route: {
-      routeId: input.routeId,
-      page: isItinerary ? page : 0,
-      pageCount: isItinerary ? pagination.pageCount : 1,
-      totalJumps: plan.totalJumps,
-      visitStart: isItinerary ? pagination.start + 1 : 1,
-      visitEnd: isItinerary
-        ? pagination.start + pagination.path.length
-        : plan.path.length,
-      visitCount: plan.path.length,
-      ...(isItinerary && pagination.nextPage !== undefined
-        ? { nextPage: pagination.nextPage }
-        : {}),
-    },
-  };
 }

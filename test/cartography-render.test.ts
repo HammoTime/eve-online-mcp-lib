@@ -11,6 +11,7 @@ import {
 } from "../src/cartography/layout.js";
 import type { Box } from "../src/cartography/layout.js";
 import { renderMap } from "../src/cartography/render.js";
+import { circuitFixture } from "./circuit-fixture.js";
 import {
   LIGHT_YEAR_METRES,
   MAP_LIMITS,
@@ -131,7 +132,7 @@ function labels(svg: string) {
   });
 }
 
-function assertGeometry(svg: string, width = 1440) {
+function assertGeometry(svg: string, width = 1440, height = 900) {
   const allNodes = nodes(svg);
   const allLabels = labels(svg);
   const frame = attributes(
@@ -235,7 +236,7 @@ function assertGeometry(svg: string, width = 1440) {
       20,
     );
     expect(Number(attr.y) + Number(attr["font-size"]) / 4).toBeLessThanOrEqual(
-      880,
+      height - 20,
     );
   }
   const gateLayer = present(
@@ -290,6 +291,46 @@ function assertGeometry(svg: string, width = 1440) {
     }
   }
 }
+
+describe("C-J6MT circuit map regression", () => {
+  it.each(["atlas", "geographic"] as const)(
+    "renders the full circuit in %s on a larger padded canvas",
+    (layout) => {
+      const { data, plan } = circuitFixture();
+      const input = request({
+        boundary: { kind: "systems", systems: plan.systems.map((s) => s.id) },
+        routes: [{ systems: plan.path }],
+        layout,
+      });
+      const map = renderMap(new MapCatalog(data), input);
+      expect(map).toMatchObject({
+        width: 3200,
+        height: 2000,
+        layout: { used: layout },
+        completeness: { omittedLabels: 0 },
+      });
+      expect(map.summary.routes[0]?.systems.map((s) => s.id)).toEqual(
+        plan.path,
+      );
+      expect(map.summary.routes[0]?.jumps).toBe(12);
+      expect(nodes(map.svg)).toHaveLength(11);
+      expect(labels(map.svg)).toHaveLength(11);
+      expect([...map.svg.matchAll(/data-arrow=/g)]).toHaveLength(12);
+      expect(map.warnings).toContainEqual(
+        expect.objectContaining({ code: "MAP_CANVAS_EXPANDED" }),
+      );
+      assertGeometry(map.svg, map.width, map.height);
+      const explicit = renderMap(new MapCatalog(data), {
+        ...input,
+        size: "large",
+      });
+      expect(explicit.svg).toBe(map.svg);
+      expect(
+        explicit.warnings.some((w) => w.code === "MAP_CANVAS_EXPANDED"),
+      ).toBe(false);
+    },
+  );
+});
 
 function expectCode(action: () => unknown, code: string) {
   expect(action).toThrow(MapError);

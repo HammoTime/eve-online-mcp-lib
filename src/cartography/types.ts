@@ -11,6 +11,11 @@ export const MAP_LIMITS = {
   responseBytes: 5_000_000,
 } as const;
 export const LIGHT_YEAR_METRES = 9_460_730_472_580_800;
+export const MAP_CANVASES = {
+  standard: { width: 1440, height: 900, paddingX: 42, paddingY: 46 },
+  wide: { width: 1600, height: 900, paddingX: 42, paddingY: 46 },
+  large: { width: 3200, height: 2000, paddingX: 96, paddingY: 90 },
+} as const;
 
 export const mapIdSchema = z
   .number()
@@ -110,7 +115,12 @@ export const mapRequestSchema = z
     title: mapText(100).optional(),
     theme: z.enum(["dark", "light"]).default("dark"),
     layout: z.enum(["atlas", "geographic"]).default("atlas"),
-    size: z.enum(["standard", "wide"]).default("standard"),
+    size: z
+      .enum(["standard", "wide", "large"])
+      .default("standard")
+      .describe(
+        "Canvas size. Large uses 3200×2000 with extra padding. Crowded route maps automatically retry at large size.",
+      ),
     preview: z.enum(["png", "none"]).default("none"),
   })
   .strict()
