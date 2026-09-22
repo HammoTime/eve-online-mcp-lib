@@ -91,7 +91,6 @@ export async function replayDiagnostic(
       "get_market_snapshot",
       "get_skill_dependencies",
       "resolve_skill_plan_targets",
-      "initialize_static_data",
     ].includes(manifest.request.tool)
   )
     throw new Error("Unsupported replay adapter");

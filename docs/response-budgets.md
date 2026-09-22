@@ -40,7 +40,7 @@ without a snapshot, and discard the old slices. No server-side private result
 store is introduced, so continuation also works across stateless hosted requests.
 
 `call_esi` returns the verified `actingCharacterId` for protected calls. Retain it
-on continuations, including requests that initially used a session default. An
+on continuations, including requests that initially used a saved default. An
 explicit character path already binds identity. Protected upstream `pagination.nextCall`
 also pins the verified identity. Finish the current page's local slices and omitted
 members before following upstream pagination; these are separate dimensions.
@@ -85,6 +85,12 @@ separators. Do not offer an importable list until all text chunks are retrieved;
 label additions versus replacement using `trainingTextKind`. A computation status
 of complete does not mean every row was included in the current presentation.
 `get_skill_dependencies` returns bounded graph data with the same selection rules.
+Both skill tools include target metadata in the selectable detail data at
+`response.path=["resolvedTargets"]`, with `counts.resolvedTargets` in the summary.
+This replaces the unbounded top-level `resolvedTargets` array. Responses with
+`status: "needs_target_selection"` default to that target view and use the same
+`data`/`output` continuation contract, including candidate paths for oversized rows.
+Keep all original targets together when requesting another slice or detail view.
 
 `resolve_skill_plan_targets`, `resolve_eve_entities` and `list_eve_characters` retain
 their `targets`, `results` and `characters` field names, paired with `output`.

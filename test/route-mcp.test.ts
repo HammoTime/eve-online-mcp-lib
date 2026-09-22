@@ -118,6 +118,39 @@ async function setup(count = 4) {
   return { client, services, graph, stored, finish, plan };
 }
 describe("tool-exclusive route planning and rendering", () => {
+  it.each(["itinerary", "fallback"])(
+    "honors title, size and escaping in %s maps",
+    async (mode) => {
+      const { client, plan, services, stored } = await setup();
+      const routeId = ((await plan()).structuredContent as { routeId: string })
+        .routeId;
+      services.data = {
+        prepare: vi.fn(() => {
+          throw new MapError("MAP_TOO_DENSE", "Dense");
+        }),
+      };
+      for (const size of ["standard", "wide"] as const) {
+        const result = await client.callTool({
+          name: "render_eve_map",
+          arguments: {
+            routeId,
+            title: 'Cargo <route> & "home"',
+            size,
+            ...(mode === "itinerary" ? { layout: "itinerary" } : {}),
+          },
+        });
+        expect(result.isError).not.toBe(true);
+        const map = routeValue([...stored.values()].at(-1));
+        expect(map.width).toBe(size === "wide" ? 1600 : 1440);
+        expect(map.title).toBe('Cargo <route> & "home" / page 1 of 1');
+        expect(map.svg).toContain("Cargo &lt;route&gt; &amp; &quot;home&quot;");
+        expect(map.svg).not.toContain("<route>");
+        expect(map.routePlan).toEqual(
+          routeValue(stored.get(routeId)).routePlan,
+        );
+      }
+    },
+  );
   it("advertises strict planning and prompt contracts, then renders the persisted route unchanged", async () => {
     const { client, services, stored, finish, plan } = await setup();
     const tools = (await client.listTools()).tools;

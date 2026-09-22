@@ -140,7 +140,8 @@ const resolvedTarget = z.discriminatedUnion("status", [
 export { resolvedTarget as resolvedTargetSchema };
 const targetSelection = z.object({
   status: z.literal("needs_target_selection"),
-  resolvedTargets: z.array(resolvedTarget),
+  counts: z.object({ resolvedTargets: count }),
+  ...jsonPageSchema.shape,
   staticData,
 });
 const operation = z.object({
@@ -183,7 +184,6 @@ const sectionName = z.enum([
 export const toolOutputSchemas = {
   search_zkillmails: zkillmailResult,
   get_zkillmail: zkillmailResult,
-  initialize_static_data: staticData,
   resolve_skill_plan_targets: z.object({
     staticData,
     targets: z
@@ -198,10 +198,13 @@ export const toolOutputSchemas = {
       targetSelection,
       z.object({
         status: z.literal("complete"),
-        resolvedTargets: z.array(resolvedTarget),
         staticData,
         ...jsonPageSchema.shape,
-        counts: z.object({ graphNodes: count, graphEdges: count }),
+        counts: z.object({
+          resolvedTargets: count,
+          graphNodes: count,
+          graphEdges: count,
+        }),
         scope: z.string(),
       }),
     ])
@@ -214,7 +217,6 @@ export const toolOutputSchemas = {
         dependencyChecked: z.literal(true),
         characterId: typeId,
         queuePolicy: z.enum(["preserve", "reorder"]),
-        resolvedTargets: z.array(resolvedTarget),
         staticData,
         baseline: z.enum([
           "conditional after retained queue",
@@ -224,6 +226,7 @@ export const toolOutputSchemas = {
         atomic: z.literal(false),
         ...jsonPageSchema.shape,
         counts: z.object({
+          resolvedTargets: count,
           plan: count,
           retainedQueue: count,
           acquisitionChecks: count,

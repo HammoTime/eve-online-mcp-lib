@@ -16,7 +16,7 @@ independently published npm package. Licensed AGPL-3.0-only; extracted from
 - `src/auth.ts` and `src/token-identity.ts` provide token contracts, refresh and
   rotation callbacks, scope inspection, and verified EVE SSO identities.
 - `src/server.ts` registers transport-independent MCP tools/resources/prompts.
-- `src/tool-output-schemas.ts` describes the structured results of the 15 core
+- `src/tool-output-schemas.ts` describes the structured results of the 14 core
   tools, including host authorization, partial workflows and source metadata.
 - Skill catalogs, dependency graphs, planning, entity resolution, character
   context and market snapshots are shared here.
@@ -94,7 +94,7 @@ snapshot-checked continuations, compact plan views and migration examples. Searc
 defaults to 10 candidates (maximum 25), character lists omit scopes unless requested,
 and map PNG previews are opt-in. Full raw data remains retrievable in bounded slices.
 
-All 15 core tools advertise an `outputSchema` in `tools/list`. These are success
+All 14 core tools advertise an `outputSchema` in `tools/list`. These are success
 contracts for the existing `structuredContent` object, not new result wrappers.
 Every schema explicitly has an object root, including the alternative local and
 hosted authorization results and the skill planner's target-selection results.
@@ -109,6 +109,12 @@ balances, strings (also used for non-JSON upstream text) and null. Upstream JSON
 schemas, rate-limit extensions and host refresh progress are also JSON-valued,
 not restricted to a guessed ESI payload shape. Source freshness, nullable page
 counts, pagination next-call arguments, warnings and caveats are retained.
+
+Skill tools initialize static data internally and return build/freshness status;
+there is no separate initialization tool. Hosts own operator refresh/recovery.
+Character context preserves permitted sections when another section lacks scopes.
+Character selection persists across sessions sharing the local store or hosted
+user and OAuth client; prefer `call_esi.actingCharacterId` for one request.
 
 Static-data status belongs to the host adapter. Its known fields are typed but
 optional; additional JSON status fields are allowed. Local cache paths/counts

@@ -1,7 +1,7 @@
 import { routeValue } from "../route-plan.js";
 import { routePlanSchema, type RoutePlan } from "../route-plan.js";
 import { wrapText } from "./layout.js";
-import { MapError, type RenderedMap } from "./types.js";
+import { MapError, mapRequestSchema, type RenderedMap } from "./types.js";
 import { MAP_FONT, MAP_THEMES } from "./themes.js";
 
 export const ROUTE_PAGE_JUMPS = 24;
@@ -41,16 +41,23 @@ export function renderItinerary(
   value: RoutePlan,
   page = 0,
   themeName: "dark" | "light" = "dark",
+  presentation: { title?: string; size?: "standard" | "wide" } = {},
 ): RenderedMap {
   const plan = routePlanSchema.parse(value),
     pagination = itineraryPage(plan, page);
   const theme = MAP_THEMES[themeName],
     systems = new Map(plan.systems.map((s) => [s.id, s]));
-  const title = `Route itinerary / page ${page + 1} of ${pagination.pageCount}`;
+  const options = {
+    title: mapRequestSchema.shape.title.parse(presentation.title),
+    size: mapRequestSchema.shape.size.parse(presentation.size),
+  };
+  const width = options.size === "wide" ? 1600 : 1440;
+  const cardWidth = (width - 88 - 4 * 16) / 5;
+  const title = `${options.title ?? "Route itinerary"} / page ${page + 1} of ${pagination.pageCount}`;
   const svg = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="map-title map-desc" font-family="${MAP_FONT}">`,
-    `<title id="map-title">${title}</title><desc id="map-desc">Server-computed permanent-stargate route. Ordered visits, not geographic coordinates. No live safety assessment. Repeated transit systems are intentional.</desc>`,
-    `<rect width="1600" height="900" fill="${theme.background}"/>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="900" viewBox="0 0 ${width} 900" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="map-title map-desc" font-family="${MAP_FONT}">`,
+    `<title id="map-title">${xml(title)}</title><desc id="map-desc">Server-computed permanent-stargate route. Ordered visits, not geographic coordinates. No live safety assessment. Repeated transit systems are intentional.</desc>`,
+    `<rect width="${width}" height="900" fill="${theme.background}"/>`,
   ];
   const text = (
     x: number,
@@ -62,7 +69,10 @@ export function renderItinerary(
     svg.push(
       `<text x="${x}" y="${y}" font-size="${size}" fill="${color}">${xml(value)}</text>`,
     );
-  text(44, 48, title, 28);
+  let titleSize = 28;
+  while (titleSize > 12 && wrapText(title, titleSize, width - 88).length > 1)
+    titleSize--;
+  text(44, 48, title, titleSize);
   text(
     44,
     82,
@@ -84,7 +94,7 @@ export function renderItinerary(
   const positions = pagination.path.map((_id, index) => {
     const row = Math.floor(index / 5),
       column = row % 2 ? 4 - (index % 5) : index % 5;
-    return { x: 44 + column * 304, y: 170 + row * 132 };
+    return { x: 44 + column * (cardWidth + 16), y: 170 + row * 132 };
   });
   positions.forEach((position, index) => {
     const next = positions[index + 1];
@@ -92,11 +102,11 @@ export function renderItinerary(
     const down = next.y !== position.y,
       right = next.x > position.x;
     const a = {
-        x: position.x + (down ? 144 : right ? 288 : 0),
+        x: position.x + (down ? cardWidth / 2 : right ? cardWidth : 0),
         y: position.y + (down ? 120 : 60),
       },
       b = {
-        x: next.x + (down ? 144 : right ? 0 : 288),
+        x: next.x + (down ? cardWidth / 2 : right ? 0 : cardWidth),
         y: next.y + (down ? 0 : 60),
       };
     const head = down
@@ -116,7 +126,7 @@ export function renderItinerary(
       stop === id ? [i] : [],
     );
     svg.push(
-      `<g><title>${xml(`${visit + 1}: ${s.name}; system ${id}; raw security ${s.securityStatus}`)}</title><rect x="${p.x}" y="${p.y}" width="288" height="120" rx="8" fill="${theme.panel}" stroke="${theme.accent}"/>`,
+      `<g><title>${xml(`${visit + 1}: ${s.name}; system ${id}; raw security ${s.securityStatus}`)}</title><rect x="${p.x}" y="${p.y}" width="${cardWidth}" height="120" rx="8" fill="${theme.panel}" stroke="${theme.accent}"/>`,
     );
     text(
       p.x + 12,
@@ -125,9 +135,12 @@ export function renderItinerary(
       15,
     );
     let fontSize = 14;
-    while (fontSize > 10 && wrapText(s.name, fontSize, 264).length > 5)
+    while (
+      fontSize > 10 &&
+      wrapText(s.name, fontSize, cardWidth - 24).length > 5
+    )
       fontSize--;
-    wrapText(s.name, fontSize, 264).forEach((line, lineIndex) =>
+    wrapText(s.name, fontSize, cardWidth - 24).forEach((line, lineIndex) =>
       text(p.x + 12, p.y + 39 + lineIndex * 13, line, fontSize),
     );
     text(
@@ -159,7 +172,7 @@ export function renderItinerary(
   }));
   return {
     svg: svg.join(""),
-    width: 1600,
+    width,
     height: 900,
     title,
     summary: {

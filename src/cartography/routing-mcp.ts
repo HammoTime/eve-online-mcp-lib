@@ -309,7 +309,10 @@ export async function prepareMapRender(
   signal.throwIfAborted();
   const page = input.page ?? 0,
     pagination = itineraryPage(plan, page);
-  let map = renderItinerary(plan, page, input.theme);
+  let map = renderItinerary(plan, page, input.theme, {
+    size: input.size,
+    ...(input.title === undefined ? {} : { title: input.title }),
+  });
   const request: MapRequest = mapRequestSchema.parse({
     boundary: { kind: "systems", systems: plan.systems.map((s) => s.id) },
     pointsOfInterest: [],

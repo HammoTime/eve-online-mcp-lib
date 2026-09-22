@@ -72,7 +72,7 @@ const READ_ONLY_ANNOTATIONS = {
 const SERVER_INSTRUCTIONS = [
   "Use this read-only EVE Online ESI server for character sheets, skills, skill queues, ships, wallet, assets, markets and routes. Prefer these tools for ESI data before inspecting the game client. Start with resolve_eve_entities for named characters, get_character_context for selected character data, or search_esi_operations for other ESI data.",
   PLANNING_AUTHORITY,
-  "For skill planning, resolve_skill_plan_targets verifies skill/ship goals; get_skill_dependencies returns the public graph; generate_skill_plan computes missing training for an explicit characterId. Submit all targets together; never merge plans or compute progress separately. Use plan_eve_skills to interpret vague goals. initialize_static_data caches CCP's SDE automatically. Missing or failed planning tools require reporting the limitation, never a reasoned or scripted substitute.",
+  "For skill planning, resolve_skill_plan_targets verifies skill/ship goals; get_skill_dependencies returns the public graph; generate_skill_plan computes missing training for an explicit characterId. Submit all targets together; never merge plans or compute progress separately. Use plan_eve_skills to interpret vague goals. Skill tools initialize CCP's SDE automatically and report freshness. Missing or failed planning tools require reporting the limitation, never a reasoned or scripted substitute.",
   "Resolve exact names to character-category IDs; keep ambiguous or unresolved matches explicit. Use an explicit character ID and request only the sections needed. For other endpoints, search_esi_operations, then get_esi_operation, then call_esi retrieves one page of a read-only operation.",
   "Public operations need no login. Protected character sections require EVE SSO with the appropriate scopes. Report each section's errors and freshness; public profile success does not establish access to protected data.",
   "Skills and skill queues can inform training and hauling plans. ESI does not expose Omega subscription status or saved in-game skill plans. Skill injector advice needs current game rules and explicit assumptions; this server cannot change skills, queues or game state. Use another source or an in-game check for information ESI does not expose.",
@@ -93,6 +93,27 @@ async function characterResult(
   }));
   const page = await pageJson(rows, response);
   return { ...status, characters: page.data, output: page.output };
+}
+
+async function targetSelectionResult(
+  result: {
+    status: "needs_target_selection";
+    resolvedTargets: unknown[];
+    staticData: Record<string, unknown>;
+  },
+  response?: z.input<typeof responseSelectionSchema>,
+) {
+  return {
+    status: result.status,
+    staticData: result.staticData,
+    counts: { resolvedTargets: result.resolvedTargets.length },
+    ...(await pageJson(
+      { resolvedTargets: result.resolvedTargets },
+      { ...response, path: response?.path ?? ["resolvedTargets"] },
+      undefined,
+      { build: result.staticData.buildNumber },
+    )),
+  };
 }
 
 function textResult(value: unknown, isError = false) {
@@ -253,37 +274,6 @@ export function createEveServer(
       "Supply exactly one of target or targets",
     );
   server.registerTool(
-    "initialize_static_data",
-    {
-      title: "Initialize EVE Online static data",
-      description:
-        "Initialize public CCP EVE Online static data; report build and freshness. Refresh checks for updates and labels stale fallback. No login. Planning initializes automatically.",
-      inputSchema: z.object({ refresh: z.boolean().default(false) }).strict(),
-      outputSchema: compactOutputSchema(
-        toolOutputSchemas.initialize_static_data,
-      ),
-      annotations: READ_ONLY_ANNOTATIONS,
-    },
-    async ({ refresh }) => {
-      return withSpan(
-        "eve.tool.initialize_static_data",
-        { "gen_ai.tool.name": "initialize_static_data" },
-        async () => {
-          try {
-            const snapshot = await staticData.initialize(refresh);
-            try {
-              return textResult(snapshot.status);
-            } finally {
-              snapshot.release?.();
-            }
-          } catch (error) {
-            return errorResult(error);
-          }
-        },
-      );
-    },
-  );
-  server.registerTool(
     "resolve_skill_plan_targets",
     {
       title: "Resolve EVE Online skill and ship planning targets",
@@ -330,7 +320,7 @@ export function createEveServer(
     {
       title: "Map EVE Online skill prerequisite dependencies",
       description:
-        "Compute public EVE Online SDE prerequisites and dependency order for all skill/ship targets together. No login. Use response.path=[nodes] or [edges] for details. Only MCP tools compute or merge plans; never reconstruct results in reasoning or scripts. If unavailable or failed, report the limitation.",
+        "Compute public EVE Online SDE prerequisites and dependency order for all skill/ship targets together. No login. Use response.path=[nodes], [edges] or [resolvedTargets] for details. Only MCP tools compute or merge plans; never reconstruct results in reasoning or scripts. If unavailable or failed, report the limitation.",
       inputSchema: targetsSchema,
       outputSchema: compactOutputSchema(
         toolOutputSchemas.get_skill_dependencies,
@@ -346,18 +336,25 @@ export function createEveServer(
             const result = await planner.dependencies(
               targets ?? (target === undefined ? [] : [target]),
             );
-            if (result.status !== "complete") return textResult(result);
-            const { graph, ...summary } = result;
+            if (result.status !== "complete")
+              return textResult(await targetSelectionResult(result, response));
+            const { graph, resolvedTargets, ...summary } = result;
             return textResult({
               ...summary,
               counts: {
+                resolvedTargets: resolvedTargets.length,
                 graphNodes: graph.nodes.length,
                 graphEdges: graph.edges.length,
               },
-              ...(await pageJson(graph, response, undefined, {
-                targets: result.resolvedTargets,
-                build: result.staticData.buildNumber,
-              })),
+              ...(await pageJson(
+                { ...graph, resolvedTargets },
+                response,
+                undefined,
+                {
+                  targets: result.resolvedTargets,
+                  build: result.staticData.buildNumber,
+                },
+              )),
             });
           } catch (error) {
             return errorResult(error);
@@ -371,7 +368,7 @@ export function createEveServer(
     {
       title: "Generate a verified character-specific EVE Online skill plan",
       description:
-        "Compute EVE Online missing training and dependency order for all targets together and explicit characterId using complete skills/queue evidence. Follow output for details; response.path selects graph, retainedQueue, trainingText or acquisitionChecks. Return trainingText unchanged. Only MCP tools compute or merge plans; never reorder or replace results in reasoning or scripts. If unavailable or failed, report the limitation. No game changes, timing, fit or clone eligibility calculation.",
+        "Compute EVE Online missing training and dependency order for all targets together and explicit characterId using complete skills/queue evidence. Follow output for details; response.path selects resolvedTargets, graph, retainedQueue, trainingText or acquisitionChecks. Return trainingText unchanged. Only MCP tools compute or merge plans; never reorder or replace results in reasoning or scripts. If unavailable or failed, report the limitation. No game changes, timing, fit or clone eligibility calculation.",
       inputSchema: z
         .object({
           characterId: positiveSafeInteger,
@@ -400,16 +397,19 @@ export function createEveServer(
               targets: targets ?? (target === undefined ? [] : [target]),
               queuePolicy,
             });
-            if (result.status !== "complete") return textResult(result);
+            if (result.status !== "complete")
+              return textResult(await targetSelectionResult(result, response));
             const {
               plan,
               graph,
               retainedQueue,
               trainingText,
               acquisitionChecks,
+              resolvedTargets,
               ...summary
             } = result;
             const details = {
+              resolvedTargets,
               plan: plan.map(
                 ({
                   skillId,
@@ -437,6 +437,7 @@ export function createEveServer(
             return textResult({
               ...summary,
               counts: {
+                resolvedTargets: resolvedTargets.length,
                 plan: plan.length,
                 retainedQueue: retainedQueue.length,
                 acquisitionChecks: acquisitionChecks.length,
@@ -544,7 +545,7 @@ export function createEveServer(
     {
       title: "Select the default EVE Online character",
       description:
-        "Choose an already authorized EVE Online character for protected operations without a character_id path parameter, such as corporation or structure requests. Character-specific operations always use their requested character. Changes only the current session default, without changing game state or granting corporation roles.",
+        "Choose an already authorized EVE Online character for protected operations without a character_id path parameter, such as corporation or structure requests. Character-specific operations always use their requested character. Persists the default across sessions sharing the local credential store, or the hosted user and OAuth client. For one request prefer call_esi.actingCharacterId. Does not change game state or grant corporation roles.",
       inputSchema: z.object({ characterId: positiveSafeInteger }),
       outputSchema: compactOutputSchema(toolOutputSchemas.select_eve_character),
       annotations: {
@@ -974,7 +975,7 @@ export function createEveServer(
                     get_market_snapshot:
                       "Collect a bounded public regional order snapshot and observed aggregates.",
                     skill_planning:
-                      "Use initialize_static_data for the local CCP cache, resolve_skill_plan_targets for verified goals, get_skill_dependencies for a public graph, and generate_skill_plan for missing training with an explicit characterId. plan_eve_skills interprets vague goals and explains limits.",
+                      "Static data initializes automatically. Use resolve_skill_plan_targets for verified goals, get_skill_dependencies for a public graph, and generate_skill_plan for missing training with an explicit characterId. plan_eve_skills interprets vague goals and explains limits.",
                   },
                   access:
                     "Public discovery and public operations never authenticate. Missing character credentials use the host’s browser authorization flow. Use list_eve_characters to inspect safe authorization metadata, authorize_eve_character to renew consent, and select_eve_character when a protected operation without a character path needs an explicit default. Never ask the user to handle tokens or run commands.",

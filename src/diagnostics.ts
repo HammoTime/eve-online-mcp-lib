@@ -72,7 +72,6 @@ export class DiagnosticCapture {
         "call_esi",
         "get_skill_dependencies",
         "resolve_skill_plan_targets",
-        "initialize_static_data",
       ].includes(request.tool)
     )
       this.incomplete("unsupported_replay_adapter");

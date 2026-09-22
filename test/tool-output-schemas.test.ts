@@ -364,8 +364,93 @@ async function setup(
 }
 
 describe("core tool output contracts", () => {
+  it("bounds and pages ambiguous targets for both skill tools", async () => {
+    const targets = Array.from({ length: 50 }, (_, i) => `Duplicate ${i}`);
+    const data = skillFixture(
+      targets.flatMap((name, i) =>
+        Array.from({ length: 20 }, (_, j) => skill(1000 + i * 20 + j, name)),
+      ),
+    );
+    const { call } = await setup({ data });
+    for (const name of [
+      "get_skill_dependencies",
+      "generate_skill_plan",
+    ] as const) {
+      const args = {
+        targets,
+        ...(name === "generate_skill_plan" ? { characterId: 42 } : {}),
+      };
+      const first = toolOutputSchemas[name].parse(await call(name, args));
+      expect(first.status).toBe("needs_target_selection");
+      expect(first.counts.resolvedTargets).toBe(50);
+      expect(first.output.complete).toBe(false);
+      expect(first.output.nextOffset).not.toBeNull();
+      expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(24000);
+      const next = await call(name, {
+        ...args,
+        response: {
+          path: ["resolvedTargets"],
+          offset: first.output.nextOffset,
+          snapshot: first.output.snapshot,
+          limit: 1,
+        },
+      });
+      expect(next).toMatchObject({
+        status: "needs_target_selection",
+        data: [],
+        output: {
+          returned: 0,
+          complete: false,
+          omitted: [
+            expect.objectContaining({
+              path: ["resolvedTargets", String(first.output.nextOffset)],
+            }),
+          ],
+        },
+      });
+      expect(
+        await call(name, {
+          ...args,
+          response: {
+            path: ["resolvedTargets", "0", "candidates"],
+            limit: 1,
+            snapshot: first.output.snapshot,
+          },
+        }),
+      ).toMatchObject({ data: [expect.objectContaining({ typeId: 1000 })] });
+    }
+  });
+
+  it("bounds successful target metadata and keeps it selectable", async () => {
+    const data = skillFixture(
+      Array.from({ length: 50 }, (_, i) =>
+        skill(1000 + i, `Skill ${i} ${"x".repeat(1900)}`),
+      ),
+    );
+    const { call } = await setup({ data });
+    const targets = data.types.map((type) => ({ typeId: type.id }));
+    const result = toolOutputSchemas.get_skill_dependencies.parse(
+      await call("get_skill_dependencies", { targets }),
+    );
+    expect(result.status).toBe("complete");
+    expect(result.counts.resolvedTargets).toBe(50);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(24000);
+    expect(
+      await call("get_skill_dependencies", {
+        targets,
+        response: {
+          path: ["resolvedTargets"],
+          limit: 1,
+          snapshot: result.output.snapshot,
+        },
+      }),
+    ).toMatchObject({
+      data: [expect.objectContaining({ typeId: 1000 })],
+      output: { returned: 1 },
+    });
+  });
   it.each(["2025-03-26", "2025-11-25", "2026-07-28"])(
-    "lists and calls all 15 object-root contracts without rewrapping on %s",
+    "lists and calls all 14 object-root contracts without rewrapping on %s",
     async (version) => {
       vi.spyOn(telemetry, "diagnosticMetadata").mockReturnValue({
         "eve/trace-id": "a".repeat(32),
@@ -383,7 +468,6 @@ describe("core tool output contracts", () => {
           true,
         ],
         ["get_zkillmail", { killmailId: 123 }, "output", {}],
-        ["initialize_static_data", {}, "stale", "false"],
         ["resolve_skill_plan_targets", { target: "Mining II" }, "output", {}],
         [
           "get_skill_dependencies",
@@ -448,7 +532,7 @@ describe("core tool output contracts", () => {
           throw new Error("Expected object body");
         check(name, { ...body, [field]: invalid }, false);
         check(name, [], false);
-        if (name !== "initialize_static_data") {
+        {
           const missing = Object.fromEntries(
             Object.entries(body).filter(([key]) => key !== field),
           );
@@ -495,7 +579,7 @@ describe("core tool output contracts", () => {
           }),
         ).toMatchObject({
           status: "needs_target_selection",
-          resolvedTargets: [{ status: "unresolved", input: "Missing" }],
+          data: [{ status: "unresolved", input: "Missing" }],
           staticData: localStatus,
         });
       }
@@ -587,9 +671,9 @@ describe("core tool output contracts", () => {
       hosted: true,
       status,
     });
-    expect(await call("initialize_static_data", { refresh: true })).toEqual(
-      status,
-    );
+    expect(
+      await call("resolve_skill_plan_targets", { target: "Mining II" }),
+    ).toHaveProperty("staticData", status);
     expect(await call("authorize_eve_character", { characterId: 42 })).toEqual({
       status: "authorization_required",
       authorizationUrl: "https://example.invalid/account/characters",
@@ -611,16 +695,6 @@ describe("core tool output contracts", () => {
       characters: [],
       defaultCharacterId: null,
     });
-    check("initialize_static_data", {}, true);
-    check(
-      "initialize_static_data",
-      {
-        refresh: [false, null, 1],
-        warning: "Retained old build",
-        stale: true,
-      },
-      true,
-    );
   });
 
   it("retains all target-selection outcomes and complete queue-policy plan fields", async () => {
@@ -948,7 +1022,7 @@ describe("core tool output contracts", () => {
       new Error("Synthetic static data failure"),
     );
     for (const [name, args] of [
-      ["initialize_static_data", {}],
+      ["resolve_skill_plan_targets", { target: "Mining II" }],
       ["get_esi_operation", { operationId: "NotAnOperation" }],
     ] as const) {
       const error = await client.callTool({ name, arguments: args });
@@ -1024,8 +1098,8 @@ describe("core tool output contracts", () => {
       status: { stale: "not a boolean" },
     });
     const result = await client.callTool({
-      name: "initialize_static_data",
-      arguments: {},
+      name: "resolve_skill_plan_targets",
+      arguments: { target: "Mining II" },
     });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toBeUndefined();

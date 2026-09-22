@@ -51,7 +51,7 @@ remain supported, but these partial captures are not exact-replay inputs.
 
 Exact adapters cover `get_market_snapshot`, `call_esi` for the reviewed public
 regional market response policy, `get_skill_dependencies`, numeric-ID
-`resolve_skill_plan_targets`, and cached `initialize_static_data`. Public market
+`resolve_skill_plan_targets`. Public market
 bodies are retained only if every field is reviewed; private structure IDs cause
 the entire body to be omitted. Cache hits without an initial cache fixture remain
 partial. Forced SDE refresh needs live adapter state and remains partial. Other
