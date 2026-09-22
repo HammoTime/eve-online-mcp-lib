@@ -159,12 +159,8 @@ describe("ESI cache and single-flight safety", () => {
       const second = await client.call(
         explicitFirst ? protectedInput : explicit,
       );
-      expect(first.pagination.nextCall?.actingCharacterId).toBe(
-        explicitFirst ? 42 : undefined,
-      );
-      expect(second.pagination.nextCall?.actingCharacterId).toBe(
-        explicitFirst ? undefined : 42,
-      );
+      expect(first.pagination.nextCall?.actingCharacterId).toBe(42);
+      expect(second.pagination.nextCall?.actingCharacterId).toBe(42);
       expect(second.cached).toBe(true);
       expect(network).toHaveBeenCalledTimes(1);
       active = 43;
@@ -222,7 +218,7 @@ describe("ESI cache and single-flight safety", () => {
       body: [1],
       headers: { "Accept-Language": "en" },
     });
-    expect(b.pagination.nextCall?.actingCharacterId).toBeUndefined();
+    expect(b.pagination.nextCall?.actingCharacterId).toBe(42);
     expect(b.pagination.nextCall?.headers).toEqual({ "accept-language": "en" });
     const firstItem = (a.data as { value: number }[])[0];
     if (!firstItem) throw new Error("Missing response item");

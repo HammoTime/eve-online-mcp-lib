@@ -16,7 +16,7 @@ independently published npm package. Licensed AGPL-3.0-only; extracted from
 - `src/auth.ts` and `src/token-identity.ts` provide token contracts, refresh and
   rotation callbacks, scope inspection, and verified EVE SSO identities.
 - `src/server.ts` registers transport-independent MCP tools/resources/prompts.
-- `src/tool-output-schemas.ts` describes the structured results of the 13 core
+- `src/tool-output-schemas.ts` describes the structured results of the 15 core
   tools, including host authorization, partial workflows and source metadata.
 - Skill catalogs, dependency graphs, planning, entity resolution, character
   context and market snapshots are shared here.
@@ -85,7 +85,16 @@ completion so durable refresh persistence can finish without blocking cancellati
 
 ## Tool output contracts
 
-All 13 core tools advertise an `outputSchema` in `tools/list`. These are success
+Public combat records are available through `search_zkillmails` and `get_zkillmail`.
+See [zKillboard usage and limits](docs/zkillboard.md) for filters, caching,
+bounded response slices and historical-evidence caveats. No EVE login is needed.
+
+See [model-facing response budgets](docs/response-budgets.md) for bounded slices,
+snapshot-checked continuations, compact plan views and migration examples. Search
+defaults to 10 candidates (maximum 25), character lists omit scopes unless requested,
+and map PNG previews are opt-in. Full raw data remains retrievable in bounded slices.
+
+All 15 core tools advertise an `outputSchema` in `tools/list`. These are success
 contracts for the existing `structuredContent` object, not new result wrappers.
 Every schema explicitly has an object root, including the alternative local and
 hosted authorization results and the skill planner's target-selection results.
@@ -116,8 +125,8 @@ contracts. Always inspect section errors, completeness and freshness before
 treating a response as evidence. Output schemas do not change access controls,
 upstream response validation or diagnostic capture policy.
 
-Core handlers still return their pretty-printed JSON text fallback, identical to
-`JSON.stringify(structuredContent, null, 2)`. SDK input/output validation failures
+Core handlers return a compact JSON text fallback, identical to
+`JSON.stringify(structuredContent)`. SDK input/output validation failures
 remain SDK-generated text errors. Diagnostic and hosted OAuth challenge metadata
 remain on the MCP result's `_meta`, outside the output schema.
 Contract tests use the actual SDK over legacy in-memory transports and a modern

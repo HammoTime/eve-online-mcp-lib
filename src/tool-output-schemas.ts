@@ -1,14 +1,24 @@
 import * as z from "zod/v4";
-import {
-  planTargetSchema,
-  requirementSchema,
-  skillLevel,
-  typeId,
-} from "./skill-data.js";
+import { planTargetSchema, requirementSchema, typeId } from "./skill-data.js";
+import { jsonPageSchema, responseOutputSchema } from "./response-budget.js";
 
 const strings = z.array(z.string());
 const count = z.number().int().nonnegative();
-const observedLevel = z.number().int().min(0).max(5);
+const zkillmailResult = z.object({
+  source: z.literal("zKillboard"),
+  url: z.string(),
+  cached: z.boolean(),
+  fetchedAt: z.string(),
+  expiresAt: z.string(),
+  complete: z.literal(false),
+  pagination: z.object({
+    page: count.nullable(),
+    hasMore: z.literal(false).nullable(),
+    nextPage: count.nullable(),
+  }),
+  caveats: strings,
+  ...jsonPageSchema.shape,
+});
 const jsonRecord = z.record(z.string(), z.json());
 
 // Status is host-owned. Describe known fields without requiring local-only
@@ -39,6 +49,7 @@ const callArguments = z.object({
   body: z.json().optional(),
 });
 const source = z.object({
+  actingCharacterId: typeId.optional(),
   operationId: z.string(),
   status: z.number().int(),
   url: z.string(),
@@ -83,13 +94,12 @@ const publicError = z.object({
   suggestedAction: z.string().nullable(),
 });
 const characters = z.object({
-  characters: z.array(
-    z.object({
-      characterId: typeId,
-      characterName: z.string(),
-      scopes: strings,
-    }),
-  ),
+  characters: z
+    .json()
+    .describe(
+      "Bounded character rows: characterId, characterName, scopeCount; scopes only on request. A response.path selection may return one member.",
+    ),
+  output: responseOutputSchema,
   defaultCharacterId: typeId.nullable(),
   legacyCredentialPendingMigration: z.boolean(),
   browserAuthorizationAvailable: z.boolean(),
@@ -127,17 +137,7 @@ const resolvedTarget = z.discriminatedUnion("status", [
     message: z.string(),
   }),
 ]);
-const trainingNode = requirementSchema.extend({
-  key: z.string(),
-  name: z.string(),
-  prerequisites: strings,
-});
-const graph = z.object({
-  nodes: z.array(trainingNode),
-  edges: z.array(z.object({ from: z.string(), to: z.string() })),
-  algorithm: z.string(),
-  complexity: z.string(),
-});
+export { resolvedTarget as resolvedTargetSchema };
 const targetSelection = z.object({
   status: z.literal("needs_target_selection"),
   resolvedTargets: z.array(resolvedTarget),
@@ -165,7 +165,7 @@ const parameter = z.object({
   schema: z.json(),
 });
 const section = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("ok"), data: z.json(), source }),
+  jsonPageSchema.extend({ status: z.literal("ok"), source }),
   z.object({ status: z.literal("error"), error: publicError }),
 ]);
 const sectionName = z.enum([
@@ -181,10 +181,17 @@ const sectionName = z.enum([
 // the SDK's legacy codec from wrapping these existing bodies in { result: ... }.
 // These are success contracts; the SDK skips output validation for isError=true.
 export const toolOutputSchemas = {
+  search_zkillmails: zkillmailResult,
+  get_zkillmail: zkillmailResult,
   initialize_static_data: staticData,
   resolve_skill_plan_targets: z.object({
     staticData,
-    targets: z.array(resolvedTarget),
+    targets: z
+      .json()
+      .describe(
+        "Bounded resolved, ambiguous, unresolved or unsupported target results, or selected member. Missing rows are described by output.",
+      ),
+    output: responseOutputSchema,
   }),
   get_skill_dependencies: z
     .discriminatedUnion("status", [
@@ -193,7 +200,8 @@ export const toolOutputSchemas = {
         status: z.literal("complete"),
         resolvedTargets: z.array(resolvedTarget),
         staticData,
-        graph,
+        ...jsonPageSchema.shape,
+        counts: z.object({ graphNodes: count, graphEdges: count }),
         scope: z.string(),
       }),
     ])
@@ -214,39 +222,19 @@ export const toolOutputSchemas = {
         ]),
         characterSources: z.object({ skills: source, skillQueue: source }),
         atomic: z.literal(false),
-        retainedQueue: z.array(
-          z.object({
-            skill_id: typeId,
-            finished_level: skillLevel,
-            queue_position: count,
-            level_end_sp: count.optional(),
-            start_date: z.string().optional(),
-            finish_date: z.string().optional(),
-          }),
-        ),
-        // planRows spreads the graph node, including its key and prerequisites.
-        plan: z.array(
-          trainingNode.extend({
-            observedTrainedLevel: observedLevel,
-            observedActiveLevel: observedLevel,
-            baselineLevel: observedLevel,
-            remainingSkillPointsEstimate: z.number().nonnegative(),
-          }),
-        ),
-        graph,
+        ...jsonPageSchema.shape,
+        counts: z.object({
+          plan: count,
+          retainedQueue: count,
+          acquisitionChecks: count,
+          graphNodes: count,
+          graphEdges: count,
+        }),
         additionalSkillPointsEstimate: z.number().nonnegative(),
-        trainingText: z.string(),
         trainingTextKind: z.enum([
           "additions after retained queue",
           "proposed replacement including existing commitments",
         ]),
-        acquisitionChecks: z.array(
-          z.object({
-            skillId: typeId,
-            name: z.string(),
-            action: z.string(),
-          }),
-        ),
         queueSlotsRemaining: count,
         caveats: strings,
       }),
@@ -267,7 +255,14 @@ export const toolOutputSchemas = {
   select_eve_character: characters,
   search_esi_operations: z.object({
     count,
-    operations: z.array(operation.extend({ matchReasons: strings })),
+    operations: z.array(
+      z.object({
+        operationId: z.string(),
+        summary: z.string(),
+        authenticated: z.boolean(),
+        matchReasons: strings,
+      }),
+    ),
     totalMatches: count,
     offset: count,
     hasMore: z.boolean(),
@@ -300,28 +295,15 @@ export const toolOutputSchemas = {
       })
       .optional(),
   }),
-  call_esi: source.extend({
-    data: z
-      .json()
-      .describe(
-        "One upstream payload: any JSON value, plain-text fallback, or null for an empty body.",
-      ),
-  }),
+  call_esi: source.extend(jsonPageSchema.shape),
   resolve_eve_entities: z.object({
     matchMode: z.literal("exact"),
-    results: z.array(
-      z.object({
-        input: z.union([z.string(), typeId]),
-        status: z.enum(["resolved", "ambiguous", "unresolved"]),
-        candidates: z.array(
-          z.object({
-            id: typeId,
-            name: z.string(),
-            category: z.string(),
-          }),
-        ),
-      }),
-    ),
+    results: z
+      .json()
+      .describe(
+        "Bounded exact entity matches (input, status, candidates with id/name/category), or selected member. Omitted evidence is not unresolved evidence.",
+      ),
+    output: responseOutputSchema,
     source,
     caveat: z.string().optional(),
   }),
@@ -329,14 +311,7 @@ export const toolOutputSchemas = {
     characterId: typeId,
     requestedSections: z.array(sectionName),
     status: z.enum(["complete", "partial"]),
-    sections: z.object({
-      profile: section.optional(),
-      location: section.optional(),
-      ship: section.optional(),
-      skills: section.optional(),
-      skillQueue: section.optional(),
-      wallet: section.optional(),
-    }),
+    sections: z.partialRecord(sectionName, section),
     atomic: z.literal(false),
     caveats: strings,
   }),

@@ -40,6 +40,8 @@ export interface EsiCallInput {
 }
 
 export interface EsiResponse {
+  /** Verified execution identity for credential-bound continuations. */
+  actingCharacterId?: number;
   operationId: string;
   status: number;
   url: string;
@@ -705,6 +707,11 @@ export class EsiClient {
       );
       if (signal?.aborted) throw cancelled();
       if (token) headers.set("authorization", `Bearer ${token}`);
+      // Pin even implicitly selected credentials before creating continuation
+      // inputs. Never attach an execution identity to public requests.
+      const actingCharacterId = token ? characterIdFromToken(token) : undefined;
+      if (actingCharacterId !== undefined)
+        input.actingCharacterId = actingCharacterId;
       // Hash the complete wire identity; no credentials or unbounded input keys are retained.
       const cacheKey = Array.from(
         new Uint8Array(
@@ -757,6 +764,7 @@ export class EsiClient {
         if (signal?.aborted) throw cancelled();
         const result: EsiResponse = {
           ...structuredClone(cached.response),
+          ...(actingCharacterId === undefined ? {} : { actingCharacterId }),
           cached: true,
           pagination: this.paginationFor(
             operation,
@@ -873,6 +881,7 @@ export class EsiClient {
           );
           const result: EsiResponse = {
             operationId: operation.operationId,
+            ...(actingCharacterId === undefined ? {} : { actingCharacterId }),
             status: response.status,
             url: url.href,
             cached: false,

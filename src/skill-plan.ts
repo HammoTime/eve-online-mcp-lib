@@ -87,7 +87,7 @@ export class SkillPlanner {
           );
           if (resolvedTargets.some((target) => target.status !== "resolved"))
             return {
-              status: "needs_target_selection",
+              status: "needs_target_selection" as const,
               resolvedTargets,
               staticData: status,
             };
@@ -95,7 +95,7 @@ export class SkillPlanner {
             target.status === "resolved" ? target.requirements : [],
           );
           return {
-            status: "complete",
+            status: "complete" as const,
             resolvedTargets,
             staticData: status,
             graph: buildSkillGraph(catalog, requirements),
@@ -155,7 +155,7 @@ export class SkillPlanner {
       // Resolve public targets before triggering character authorization.
       if (resolvedTargets.some((target) => target.status !== "resolved"))
         return {
-          status: "needs_target_selection",
+          status: "needs_target_selection" as const,
           resolvedTargets,
           staticData: status,
         };
@@ -325,7 +325,7 @@ export class SkillPlanner {
           "Check skillbook ownership or direct character-sheet purchase before injection.",
       }));
       return {
-        status: "complete",
+        status: "complete" as const,
         dependencyChecked: true,
         characterId: input.characterId,
         queuePolicy: policy,

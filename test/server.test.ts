@@ -177,6 +177,8 @@ describe("EVE MCP server", () => {
     const client = await connectedClient();
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
+      "search_zkillmails",
+      "get_zkillmail",
       "initialize_static_data",
       "resolve_skill_plan_targets",
       "get_skill_dependencies",
@@ -490,7 +492,7 @@ describe("EVE MCP server", () => {
     });
     expect(dependencies.structuredContent).toMatchObject({
       status: "complete",
-      graph: { nodes: expect.any(Array), edges: expect.any(Array) },
+      data: { nodes: expect.any(Array), edges: expect.any(Array) },
     });
     const unknown = await client.callTool({
       name: "generate_skill_plan",
@@ -550,7 +552,7 @@ describe("EVE MCP server", () => {
     );
     expect(result.structuredContent).toMatchObject({
       status: "complete",
-      trainingText: "Mining II",
+      data: [{ name: "Mining", level: 2 }],
       additionalSkillPointsEstimate: 1165,
     });
     expect(fetcher).toHaveBeenCalledTimes(2);
