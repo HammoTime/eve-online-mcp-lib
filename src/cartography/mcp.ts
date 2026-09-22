@@ -8,9 +8,15 @@ import {
 import * as z from "zod/v4";
 import { compactOutputSchema } from "../output-schema.js";
 import { attributes, diagnosticMetadata, withSpan } from "../telemetry.js";
-import { renderMap, renderPreparedMap } from "./render.js";
-import { MapError, MAP_LIMITS, mapRequestSchema } from "./types.js";
+import { MapError, MAP_LIMITS } from "./types.js";
 import type { CartographyServices } from "./service.js";
+import {
+  prepareMapRender,
+  registerRoutePlanning,
+  renderRequestSchema,
+  routePageSchema,
+} from "./routing-mcp.js";
+import { PLANNING_AUTHORITY, ROUTE_INSTRUCTIONS } from "../route-guidance.js";
 
 const warningSchema = z.object({ code: z.string(), message: z.string() });
 const artifactSchema = z.object({
@@ -77,6 +83,7 @@ export const mapResultSchema = z.union([
       }),
     }),
     warnings: z.array(warningSchema),
+    route: routePageSchema.optional(),
   }),
   z.object({
     status: z.enum(["failed", "needs_selection"]),
@@ -86,8 +93,7 @@ export const mapResultSchema = z.union([
   }),
 ]);
 
-export const MAP_INSTRUCTIONS =
-  "Use render_eve_map only to visualize an existing plan: supply an explicit boundary, pointsOfInterest (or []), and any already-ordered route systems obtained from other tools. For a system and its immediate permanent-stargate neighbors, request boundary:{kind:'neighborhood',center:<exact system name or numeric ID>,jumps:1} directly; no ESI discovery or per-neighbor calls are needed. Only jumps:1 is supported and is the default. It never plans, recommends destinations or computes routes. SVG is the primary artifact, with an opt-in PNG preview (preview:png; default none); inline display depends on the host. Retrieve the original through its MCP resource URI, not by treating it as a public web URL. No EVE login is needed.";
+export const MAP_INSTRUCTIONS = `${ROUTE_INSTRUCTIONS} Context maps use an explicit boundary and pointsOfInterest (or []). For one system and its immediate permanent-stargate neighbors request boundary:{kind:'neighborhood',center:<exact name or ID>,jumps:1} directly, without ESI discovery or per-neighbor calls. Only jumps:1 is supported. Route maps require routeId from plan_eve_route; raw route arrays are forbidden. SVG is the primary artifact; request preview:png for inline images. Resources use private MCP URIs, not public web URLs. ${PLANNING_AUTHORITY}`;
 
 /** Host-independent renderer registration. No EsiClient/planner/auth dependency. */
 export function registerCartography(
@@ -95,13 +101,13 @@ export function registerCartography(
   services: CartographyServices,
   protocolVersionHint?: string,
 ) {
+  registerRoutePlanning(server, services);
   server.registerTool(
     "render_eve_map",
     {
       title: "Render an EVE Online map of an existing plan",
-      description:
-        "Render an EVE Online SVG from an explicit boundary, a required list of points of interest and optional already-planned ordered routes. Exact names or numeric IDs; permanent gates only. Request boundary:{kind:'neighborhood',center:<exact system name or numeric ID>,jumps:1} directly for the center plus all incoming/outgoing permanent-stargate neighbors from validated SDE, without ESI discovery or per-neighbor calls. jumps defaults to 1; only 1 is supported. All boundaries are limited to 250 systems; oversized scopes fail without trimming. Never creates plans, chooses destinations, calculates routes or recommends activities. Reads public SDE geography, writes private generated artifacts (up to seven days, subject to storage eviction), and optionally returns a PNG preview. No game-state changes or EVE login. Inline display is host-dependent; read the returned SVG MCP resource for the original.",
-      inputSchema: mapRequestSchema,
+      description: `Render an EVE Online server-computed route by routeId, or a context map from an explicit boundary and pointsOfInterest. Nonempty raw routes are rejected. Never creates plans, chooses destinations, calculates routes or recommends activities; call plan_eve_route first. Dense route maps automatically become consecutive numbered itinerary pages; follow route.nextPage with the same routeId. Never redraw, trim or reconstruct a failed map. Request boundary:{kind:'neighborhood',center:<exact name or ID>,jumps:1} directly for immediate permanent-stargate neighbors, without ESI discovery or per-neighbor calls. Only jumps:1 is supported; context boundaries are limited to 250 systems. Writes private expiring SVG artifacts and optionally a PNG preview. No EVE login or game-state changes. ${PLANNING_AUTHORITY}`,
+      inputSchema: renderRequestSchema,
       outputSchema: compactOutputSchema(mapResultSchema),
       annotations: {
         readOnlyHint: false,
@@ -110,7 +116,7 @@ export function registerCartography(
         openWorldHint: true,
       },
     },
-    async (request, ctx) =>
+    async (input, ctx) =>
       withSpan(
         "eve.tool.render_eve_map",
         { "gen_ai.tool.name": "render_eve_map" },
@@ -120,16 +126,12 @@ export function registerCartography(
             const signal = ctx.mcpReq.signal;
             signal.throwIfAborted();
             finish = services.beginRender?.(signal);
-            const prepared =
-              "prepare" in services.data
-                ? await services.data.prepare(request, signal)
-                : await services.data.initialize();
-            const { status } = prepared;
+            const { map, status, request, route } = await prepareMapRender(
+              services,
+              input,
+              signal,
+            );
             signal.throwIfAborted();
-            const map =
-              "scene" in prepared
-                ? renderPreparedMap(prepared.scene, request)
-                : renderMap(prepared.catalog, request);
             const warnings = [...map.warnings];
             if (status.stale)
               warnings.push({
@@ -196,6 +198,7 @@ export function registerCartography(
               completeness: map.completeness,
               sources: { staticData: status },
               warnings,
+              ...(route ? { route } : {}),
             });
             const content: ContentBlock[] = [
               { type: "text", text: JSON.stringify(structuredContent) },

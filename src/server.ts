@@ -40,6 +40,7 @@ import { MAP_INSTRUCTIONS, registerCartography } from "./cartography/mcp.js";
 import type { CartographyServices } from "./cartography/service.js";
 import { toolOutputSchemas } from "./tool-output-schemas.js";
 import { compactOutputSchema } from "./output-schema.js";
+import { PLANNING_AUTHORITY } from "./route-guidance.js";
 import {
   defaultZKillboardClient,
   ZKillboardClient,
@@ -70,7 +71,8 @@ const READ_ONLY_ANNOTATIONS = {
 // Keep the first 512 characters useful on their own for host discovery.
 const SERVER_INSTRUCTIONS = [
   "Use this read-only EVE Online ESI server for character sheets, skills, skill queues, ships, wallet, assets, markets and routes. Prefer these tools for ESI data before inspecting the game client. Start with resolve_eve_entities for named characters, get_character_context for selected character data, or search_esi_operations for other ESI data.",
-  "For skill planning, resolve_skill_plan_targets verifies skill/ship goals; get_skill_dependencies returns the public graph; generate_skill_plan computes missing training for an explicit characterId. Use plan_eve_skills to interpret vague goals. initialize_static_data caches CCP's SDE automatically. Never reconstruct prerequisites or subtract trained/queued levels by reasoning when the planner is available.",
+  PLANNING_AUTHORITY,
+  "For skill planning, resolve_skill_plan_targets verifies skill/ship goals; get_skill_dependencies returns the public graph; generate_skill_plan computes missing training for an explicit characterId. Submit all targets together; never merge plans or compute progress separately. Use plan_eve_skills to interpret vague goals. initialize_static_data caches CCP's SDE automatically. Missing or failed planning tools require reporting the limitation, never a reasoned or scripted substitute.",
   "Resolve exact names to character-category IDs; keep ambiguous or unresolved matches explicit. Use an explicit character ID and request only the sections needed. For other endpoints, search_esi_operations, then get_esi_operation, then call_esi retrieves one page of a read-only operation.",
   "Public operations need no login. Protected character sections require EVE SSO with the appropriate scopes. Report each section's errors and freshness; public profile success does not establish access to protected data.",
   "Skills and skill queues can inform training and hauling plans. ESI does not expose Omega subscription status or saved in-game skill plans. Skill injector advice needs current game rules and explicit assumptions; this server cannot change skills, queues or game state. Use another source or an in-game check for information ESI does not expose.",
@@ -328,7 +330,7 @@ export function createEveServer(
     {
       title: "Map EVE Online skill prerequisite dependencies",
       description:
-        "Return bounded prerequisite graph details for verified EVE Online SDE skill or ship targets. Computation includes the complete graph, topological order and cycle detection. Use response.path=[nodes] or [edges] for omitted collections. No character data or login is used. A ship means minimum hull requirements, not fit viability.",
+        "Compute public EVE Online SDE prerequisites and dependency order for all skill/ship targets together. No login. Use response.path=[nodes] or [edges] for details. Only MCP tools compute or merge plans; never reconstruct results in reasoning or scripts. If unavailable or failed, report the limitation.",
       inputSchema: targetsSchema,
       outputSchema: compactOutputSchema(
         toolOutputSchemas.get_skill_dependencies,
@@ -369,7 +371,7 @@ export function createEveServer(
     {
       title: "Generate a verified character-specific EVE Online skill plan",
       description:
-        "Generate a deterministic EVE Online prerequisite-ordered training plan for verified targets and explicit characterId. Complete scoped skills/queue evidence is required. Default data is compact plan rows with totals, queue policy and caveats. Request response.path=[graph], [retainedQueue], [trainingText] or [acquisitionChecks] separately; follow output for bounded details. Computation removes permanent trained levels, preserves/reorders queue commitments and replays dependencies. Does not edit game state or calculate clone eligibility, fit validity or training time.",
+        "Compute EVE Online missing training and dependency order for all targets together and explicit characterId using complete skills/queue evidence. Follow output for details; response.path selects graph, retainedQueue, trainingText or acquisitionChecks. Return trainingText unchanged. Only MCP tools compute or merge plans; never reorder or replace results in reasoning or scripts. If unavailable or failed, report the limitation. No game changes, timing, fit or clone eligibility calculation.",
       inputSchema: z
         .object({
           characterId: positiveSafeInteger,

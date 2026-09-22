@@ -83,6 +83,10 @@ function notesFor(
   ];
   if (operation.operationId === "PostUniverseNames")
     notes.push("One invalid ID can cause ESI to reject the entire batch.");
+  if (operation.operationId === "GetRouteOriginDestination")
+    notes.push(
+      "For route planning, pickup loops, stop optimization and route maps, use plan_eve_route with all stops together, then render_eve_map with its routeId. This single-pair ESI operation is raw evidence only; never concatenate responses, optimize orders or construct a route in assistant reasoning or scripts.",
+    );
   if (
     [
       "GetCharactersCharacterIdSkills",

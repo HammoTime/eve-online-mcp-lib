@@ -1,3 +1,5 @@
+import { PLANNING_AUTHORITY, ROUTE_INSTRUCTIONS } from "./route-guidance.js";
+
 export const EVE_ACTIVITY_TYPES = [
   "exploration",
   "factional_warfare",
@@ -26,7 +28,7 @@ export const ACTIVITY_GUIDANCE: Record<EveActivity, ActivityGuidance> = {
     clarify:
       "Establish the desired security space, data/relic versus broader exploration goal, session length, solo/group preference, scanning experience, and acceptable ship-and-cargo loss. Ask no more than three focused questions, and skip questions already answered by the goal or constraints.",
     evidence:
-      "Use get_character_context for location, ship, skills, and wallet when they materially affect the plan. If an explicit character ID is available and owned alternatives matter, inspect GetCharactersCharacterIdAssets and identify scanning-capable hulls from verified type/group data rather than names alone. Resolve candidate systems, compare routes with GetRouteOriginDestination, and use GetUniverseSystemJumps and GetUniverseSystemKills only as historical activity indicators. Check replacement hull, probe, launcher, and other user-selected item prices with bounded market snapshots.",
+      "Use get_character_context for location, ship, skills, and wallet when they materially affect the plan. If an explicit character ID is available and owned alternatives matter, inspect GetCharactersCharacterIdAssets and identify scanning-capable hulls from verified type/group data rather than names alone. Resolve candidate systems, request complete routes with plan_eve_route, and use GetUniverseSystemJumps and GetUniverseSystemKills only as historical activity indicators. Check replacement hull, probe, launcher, and other user-selected item prices with bounded market snapshots.",
     advice:
       "Recommend an executable starting route or area appropriate to the pilot's skills, time, risk tolerance, and replacement budget. Prefer an already-owned suitable hull when practical; otherwise give a short shopping list and a verified public-market source. Include preparation, safe-return and cargo-drop rules, route-security tradeoffs, and the first in-game action.",
     limits:
@@ -48,7 +50,7 @@ export const ACTIVITY_GUIDANCE: Record<EveActivity, ActivityGuidance> = {
     clarify:
       "Establish ore, ice, or gas preference; solo versus fleet play; security-space tolerance; session length; hauling or refining access; and the acceptable ship-loss budget. Ask no more than three focused questions, and skip questions already answered by the goal or constraints.",
     evidence:
-      "Use get_character_context for location, ship, skills, and wallet. With an explicit character ID, inspect every required page of GetCharactersCharacterIdAssets and classify mining-capable hulls using verified universe type, group, and category data; preserve each candidate's actual asset location and nesting instead of assuming it is nearby or accessible. Inspect GetCharactersCharacterIdMining for recent resource types and locations when useful. Resolve asset locations, compare secure and shortest routes, and evaluate accessible public trade hubs rather than assuming Jita is nearest. Use GetMarketsRegionIdHistory for demand context and bounded get_market_snapshot calls for a small evidence-driven shortlist of mineable resources and any needed hull or modules.",
+      "Use get_character_context for location, ship, skills, and wallet. With an explicit character ID, inspect every required page of GetCharactersCharacterIdAssets and classify mining-capable hulls using verified universe type, group, and category data; preserve each candidate's actual asset location and nesting instead of assuming it is nearby or accessible. Inspect GetCharactersCharacterIdMining for recent resource types and locations when useful. Resolve asset locations, compare complete plan_eve_route results under explicit hard security constraints, and evaluate accessible public trade hubs rather than assuming Jita is nearest. Use GetMarketsRegionIdHistory for demand context and bounded get_market_snapshot calls for a small evidence-driven shortlist of mineable resources and any needed hull or modules.",
     advice:
       "Start from suitable ships the character already owns and say exactly where they are, how to retrieve them, and whether retrieval is sensible within the session. Otherwise recommend a skill-compatible hull and a bounded replacement-cost shopping list. Recommend a resource focus only after considering verified skills, recent activity, route and security, hauling volume, observed demand, and comparable public buy prices at the destination; state whether selling raw, compressed, or refined material is an assumption requiring an in-game yield check. Give a travel-and-staging plan, cargo-drop rule, and first action.",
     limits:
@@ -81,7 +83,7 @@ export const ACTIVITY_GUIDANCE: Record<EveActivity, ActivityGuidance> = {
     clarify:
       "Establish owned-cargo versus courier work, origin and destination, cargo volume and value, collateral, reward, deadline, ship preference, route-security tolerance, and whether scouts or escorts are available. Ask no more than three focused questions, and skip questions already answered by the goal or constraints.",
     evidence:
-      "Use get_character_context for location, ship, skills, and wallet. Inspect GetCharactersCharacterIdAssets for owned haulers and cargo locations, and GetCharactersCharacterIdContracts or public regional contracts only when contract work is requested and visible to the character. Verify cargo and hull properties from universe and dogma data when possible. Resolve endpoints, compare secure and shortest variants with GetRouteOriginDestination, and use GetUniverseSystemKills and GetUniverseSystemJumps only as historical risk indicators. Price the hull, cargo, and collateral exposure from bounded public-market evidence when material.",
+      "Use get_character_context for location, ship, skills, and wallet. Inspect GetCharactersCharacterIdAssets for owned haulers and cargo locations, and GetCharactersCharacterIdContracts or public regional contracts only when contract work is requested and visible to the character. Verify cargo and hull properties from universe and dogma data when possible. Resolve endpoints, request complete routes with plan_eve_route and explicit hard security constraints, and use GetUniverseSystemKills and GetUniverseSystemJumps only as historical risk indicators. Price the hull, cargo, and collateral exposure from bounded public-market evidence when material.",
     advice:
       "Check that verified capacity, access, collateral, deadline, and wallet support the run before recommending it. Present route alternatives, total jumps, security exposure, cargo-value-to-hull tradeoff, replacement and collateral-at-risk amounts, docking or structure-access assumptions, and operational precautions. Reject or flag economically irrational contracts rather than optimizing only for reward per jump, and give the first in-game verification step; the pilot must accept contracts manually.",
     limits:
@@ -126,6 +128,8 @@ export function renderActivityGuidance(activity: EveActivity): string {
   const guidance = ACTIVITY_GUIDANCE[activity];
   return [
     `Activity playbook: ${guidance.title}.`,
+    PLANNING_AUTHORITY,
+    ROUTE_INSTRUCTIONS,
     `Clarify only material gaps: ${guidance.clarify}`,
     `Evidence workflow: ${guidance.evidence}`,
     `Turn evidence into advice: ${guidance.advice}`,
