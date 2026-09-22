@@ -11,6 +11,8 @@ import {
 } from "../src/cartography/types.js";
 import type { CartographyServices } from "../src/cartography/service.js";
 import { routeFixture } from "./route-fixtures.js";
+import { circuitFixture } from "./circuit-fixture.js";
+import { createRouteArtifact } from "../src/cartography/route-artifact.js";
 import {
   PLANNING_AUTHORITY,
   renderRouteGuidance,
@@ -118,39 +120,30 @@ async function setup(count = 4) {
   return { client, services, graph, stored, finish, plan };
 }
 describe("tool-exclusive route planning and rendering", () => {
-  it.each(["itinerary", "fallback"])(
-    "honors title, size and escaping in %s maps",
-    async (mode) => {
-      const { client, plan, services, stored } = await setup();
-      const routeId = ((await plan()).structuredContent as { routeId: string })
-        .routeId;
-      services.data = {
-        prepare: vi.fn(() => {
-          throw new MapError("MAP_TOO_DENSE", "Dense");
-        }),
-      };
-      for (const size of ["standard", "wide"] as const) {
-        const result = await client.callTool({
-          name: "render_eve_map",
-          arguments: {
-            routeId,
-            title: 'Cargo <route> & "home"',
-            size,
-            ...(mode === "itinerary" ? { layout: "itinerary" } : {}),
-          },
-        });
-        expect(result.isError).not.toBe(true);
-        const map = routeValue([...stored.values()].at(-1));
-        expect(map.width).toBe(size === "wide" ? 1600 : 1440);
-        expect(map.title).toBe('Cargo <route> & "home" / page 1 of 1');
-        expect(map.svg).toContain("Cargo &lt;route&gt; &amp; &quot;home&quot;");
-        expect(map.svg).not.toContain("<route>");
-        expect(map.routePlan).toEqual(
-          routeValue(stored.get(routeId)).routePlan,
-        );
-      }
-    },
-  );
+  it("honors title, size and escaping in route maps", async () => {
+    const { client, plan, stored } = await setup();
+    const routeId = ((await plan()).structuredContent as { routeId: string })
+      .routeId;
+    for (const size of ["standard", "wide", "large"] as const) {
+      const result = await client.callTool({
+        name: "render_eve_map",
+        arguments: {
+          routeId,
+          title: 'Cargo <route> & "home"',
+          size,
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      const map = routeValue([...stored.values()].at(-1));
+      expect(map.width).toBe(
+        size === "large" ? 3200 : size === "wide" ? 1600 : 1440,
+      );
+      expect(map.title).toBe('Cargo <route> & "home"');
+      expect(map.svg).toContain("Cargo &lt;route&gt; &amp; &quot;home&quot;");
+      expect(map.svg).not.toContain("<route>");
+      expect(map.routePlan).toEqual(routeValue(stored.get(routeId)).routePlan);
+    }
+  });
   it("advertises strict planning and prompt contracts, then renders the persisted route unchanged", async () => {
     const { client, services, stored, finish, plan } = await setup();
     const tools = (await client.listTools()).tools;
@@ -192,7 +185,7 @@ describe("tool-exclusive route planning and rendering", () => {
       mimeType: "image/png",
     });
     expect(rendered.structuredContent).toMatchObject({
-      route: { routeId, totalJumps: 3, visitCount: 4, pageCount: 1 },
+      route: { routeId, totalJumps: 3, visitCount: 4 },
     });
     expect(routeValue([...stored.values()].at(-1)).routePlan).toEqual(original);
     expect(routeValue(stored.get(routeId)).routePlan).toEqual(original);
@@ -253,7 +246,7 @@ describe("tool-exclusive route planning and rendering", () => {
     expect(services.artifacts.put).not.toHaveBeenCalled();
     expect(finish).toHaveBeenCalledTimes(4);
   });
-  it("pages the 64-jump regression without omitting or merging route steps, even when PNG fails", async () => {
+  it("preserves every route visit as text when a map cannot fit, without generating an itinerary image", async () => {
     const { client, services, plan, stored } = await setup(33);
     const planned = await plan({
       origin: 1,
@@ -263,43 +256,34 @@ describe("tool-exclusive route planning and rendering", () => {
     const routeId = (planned.structuredContent as { routeId: string }).routeId;
     services.data = {
       prepare: vi.fn(() => {
-        throw new MapError("MAP_TOO_DENSE", "Too dense");
+        throw new MapError("MAP_TOO_DENSE", "private layout detail");
       }),
     };
-    vi.mocked(routeValue(services.preview).render).mockRejectedValue(
-      new Error("private PNG detail"),
+    const response = await client.callTool({
+      name: "render_eve_map",
+      arguments: { routeId, preview: "png" },
+    });
+    const original = routeValue(routeValue(stored.get(routeId)).routePlan);
+    const names = new Map(original.systems.map((s) => [s.id, s.name]));
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      status: "failed",
+      code: "MAP_TOO_DENSE",
+      details: {
+        routeId,
+        totalJumps: 64,
+        visitCount: 65,
+        routeText: original.path.map((id) => names.get(id)).join("\n"),
+      },
+    });
+    expect(JSON.stringify(response)).not.toContain("private layout detail");
+    expect(response.content).not.toContainEqual(
+      expect.objectContaining({ type: "image" }),
     );
-    const visits: number[] = [];
-    for (let page = 0; page < 3; page++) {
-      const response = await client.callTool({
-        name: "render_eve_map",
-        arguments: { routeId, preview: "png", ...(page ? { page } : {}) },
-      });
-      expect(response.isError).not.toBe(true);
-      expect(response.structuredContent).toMatchObject({
-        status: "partial",
-        route: { routeId, page, pageCount: 3, totalJumps: 64 },
-        layout: { used: "itinerary" },
-      });
-      const map = routeValue([...stored.values()].at(-1));
-      const ids = routeValue(map.summary.routes[0]).systems.map((s) => s.id);
-      visits.push(...(page ? ids.slice(1) : ids));
-      expect(map.routePlan).toEqual(routeValue(stored.get(routeId)).routePlan);
-    }
-    expect(visits).toEqual(
-      routeValue(routeValue(stored.get(routeId)).routePlan).path,
-    );
-    expect(services.data.prepare).toHaveBeenCalledOnce();
-    expect(
-      (
-        await client.callTool({
-          name: "render_eve_map",
-          arguments: { routeId, page: 3 },
-        })
-      ).isError,
-    ).toBe(true);
+    expect(stored.size).toBe(1);
+    expect(routeValue(services.preview).render).not.toHaveBeenCalled();
   });
-  it("uses captured snapshot names on changed geometry, and supports explicit itinerary without data access", async () => {
+  it("rejects changed geometry and removed itinerary/page inputs while preserving the captured route", async () => {
     const { client, graph, plan, services } = await setup();
     const routeId = ((await plan()).structuredContent as { routeId: string })
       .routeId;
@@ -309,26 +293,59 @@ describe("tool-exclusive route planning and rendering", () => {
       arguments: { routeId },
     });
     expect(response.structuredContent).toMatchObject({
-      layout: { used: "itinerary" },
-      sources: { staticData: { buildNumber: 42 } },
-      warnings: expect.arrayContaining([
-        expect.objectContaining({ code: "ROUTE_ITINERARY_FALLBACK" }),
-      ]),
+      status: "failed",
+      code: "ROUTE_GEOMETRY_CHANGED",
+      details: {
+        routeId,
+        source: { buildNumber: 42 },
+        routeText: "System 1\nSystem 2\nSystem 3\nSystem 4",
+      },
     });
+    for (const presentation of [{ layout: "itinerary" }, { page: 0 }]) {
+      expect(
+        (
+          await client.callTool({
+            name: "render_eve_map",
+            arguments: { routeId, ...presentation },
+          })
+        ).isError,
+      ).toBe(true);
+    }
+    expect(services.artifacts.put).toHaveBeenCalledOnce();
+    expect(routeValue(services.preview).render).not.toHaveBeenCalled();
+  });
+  it("renders the real C-J6MT circuit by its unchanged handle on an expanded atlas", async () => {
+    const { client, services, stored } = await setup();
+    const { data, plan } = circuitFixture();
+    const artifact = await services.artifacts.put(
+      createRouteArtifact(plan),
+      plan.source,
+    );
     services.data = {
-      prepare: vi.fn(() => {
-        throw new Error("must not load");
-      }),
+      initialize: vi.fn(() =>
+        Promise.resolve({
+          catalog: new MapCatalog(data),
+          status: plan.source,
+        }),
+      ),
     };
-    expect(
-      (
-        await client.callTool({
-          name: "render_eve_map",
-          arguments: { routeId, layout: "itinerary", theme: "light" },
-        })
-      ).isError,
-    ).not.toBe(true);
-    expect(services.data.prepare).not.toHaveBeenCalled();
+    const response = await client.callTool({
+      name: "render_eve_map",
+      arguments: { routeId: artifact.id, preview: "png" },
+    });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      status: "ready",
+      artifact: { width: 3200, height: 2000 },
+      layout: { used: "atlas" },
+      route: { totalJumps: 12, visitCount: 13 },
+    });
+    expect(routeValue([...stored.values()].at(-1)).routePlan).toEqual(plan);
+    expect(routeValue(services.preview).render).toHaveBeenCalledWith(
+      expect.stringContaining('height="2000"'),
+      3200,
+      expect.any(AbortSignal),
+    );
   });
   it("fails closed for missing, expired or malformed handles and never replans on render", async () => {
     const { client, plan, stored, services } = await setup();
@@ -364,8 +381,12 @@ describe("tool-exclusive route planning and rendering", () => {
       arguments: { routeId },
     });
     expect(rendered.structuredContent).toMatchObject({
-      layout: { used: "itinerary" },
-      route: { totalJumps: 3 },
+      status: "failed",
+      code: "MAP_DATA_UNAVAILABLE",
+      details: {
+        totalJumps: 3,
+        routeText: "System 1\nSystem 2\nSystem 3\nSystem 4",
+      },
     });
     expect(JSON.stringify(rendered)).not.toContain("private geometry detail");
     services.data = {
@@ -382,7 +403,7 @@ describe("tool-exclusive route planning and rendering", () => {
       ).isError,
     ).toBe(true);
   });
-  it("renders long routes directly as bounded pages without loading atlas geometry", async () => {
+  it("returns long routes as complete text without loading atlas geometry", async () => {
     const { client, plan, services } = await setup(110);
     const routeId = ((await plan()).structuredContent as { routeId: string })
       .routeId;
@@ -399,8 +420,13 @@ describe("tool-exclusive route planning and rendering", () => {
         })
       ).structuredContent,
     ).toMatchObject({
-      layout: { used: "itinerary" },
-      route: { pageCount: 5, totalJumps: 109, nextPage: 1 },
+      status: "failed",
+      code: "ROUTE_MAP_LIMIT",
+      details: {
+        totalJumps: 109,
+        visitCount: 110,
+        routeText: expect.stringContaining("System 110"),
+      },
     });
     expect(services.data.prepare).not.toHaveBeenCalled();
   });

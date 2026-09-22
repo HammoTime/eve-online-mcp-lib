@@ -1,0 +1,363 @@
+{
+  "schemaVersion": 1,
+  "buildNumber": 3532181,
+  "releaseDate": "2026-09-22T11:08:58Z",
+  "sourceUrl": "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-3532181-jsonl.zip",
+  "fetchedAt": "2026-09-22T12:53:54.043Z",
+  "systems": [
+    {
+      "id": 30000529,
+      "name": "MKIG-5",
+      "regionId": 10000006,
+      "constellationId": 20000077,
+      "position": {
+        "x": 123649250037602110,
+        "y": -13451343427843326,
+        "z": -156312156707279230
+      },
+      "securityStatus": -0.221997,
+      "position2D": {
+        "x": 320496592801200200,
+        "y": -265026028662530940
+      }
+    },
+    {
+      "id": 30000530,
+      "name": "YHEN-G",
+      "regionId": 10000006,
+      "constellationId": 20000077,
+      "position": {
+        "x": 121305857339269780,
+        "y": -7517381050098433,
+        "z": -153937107575163260
+      },
+      "securityStatus": -0.199527,
+      "position2D": {
+        "x": 326659988816607900,
+        "y": -275298355354877100
+      }
+    },
+    {
+      "id": 30000531,
+      "name": "E-JCUS",
+      "regionId": 10000006,
+      "constellationId": 20000077,
+      "position": {
+        "x": 117074128577769490,
+        "y": -9953752482013010,
+        "z": -157289305401363460
+      },
+      "securityStatus": -0.215627,
+      "position2D": {
+        "x": 320496592801200200,
+        "y": -277352820693346300
+      }
+    },
+    {
+      "id": 30000536,
+      "name": "4F89-U",
+      "regionId": 10000006,
+      "constellationId": 20000077,
+      "position": {
+        "x": 110669678185761020,
+        "y": -10361681618346186,
+        "z": -155762940021492000
+      },
+      "securityStatus": -0.245349,
+      "position2D": {
+        "x": 310224266108854000,
+        "y": -277352820693346300
+      }
+    },
+    {
+      "id": 30000540,
+      "name": "L-FM3P",
+      "regionId": 10000006,
+      "constellationId": 20000078,
+      "position": {
+        "x": 135375755337339460,
+        "y": -1290037627681534,
+        "z": -148888351494893470
+      },
+      "securityStatus": -0.170869,
+      "position2D": {
+        "x": 310224266108854000,
+        "y": -258862632647123230
+      }
+    },
+    {
+      "id": 30000544,
+      "name": "GM-50Y",
+      "regionId": 10000006,
+      "constellationId": 20000078,
+      "position": {
+        "x": 130597642269297400,
+        "y": -1158602654834247,
+        "z": -155824707954785120
+      },
+      "securityStatus": -0.166767,
+      "position2D": {
+        "x": 316387662124261760,
+        "y": -258862632647123230
+      }
+    },
+    {
+      "id": 30000552,
+      "name": "GPLB-C",
+      "regionId": 10000006,
+      "constellationId": 20000080,
+      "position": {
+        "x": 111875499184773810,
+        "y": -4427459566391882,
+        "z": -144551103740458600
+      },
+      "securityStatus": -0.254697,
+      "position2D": {
+        "x": 295843008739569400,
+        "y": -265026028662530940
+      }
+    },
+    {
+      "id": 30000557,
+      "name": "6-L4YC",
+      "regionId": 10000006,
+      "constellationId": 20000080,
+      "position": {
+        "x": 111561075685414660,
+        "y": -4918841464361071,
+        "z": -148664748045178530
+      },
+      "securityStatus": -0.241496,
+      "position2D": {
+        "x": 304060870093446340,
+        "y": -265026028662530940
+      }
+    },
+    {
+      "id": 30000772,
+      "name": "C-J6MT",
+      "regionId": 10000009,
+      "constellationId": 20000113,
+      "position": {
+        "x": 129744676842567060,
+        "y": 8872976434890478,
+        "z": -125300725645515340
+      },
+      "securityStatus": -0.288745,
+      "position2D": {
+        "x": 365694830247523300,
+        "y": -205446533846923200
+      }
+    },
+    {
+      "id": 30000773,
+      "name": "78-0R6",
+      "regionId": 10000009,
+      "constellationId": 20000113,
+      "position": {
+        "x": 124739708606609820,
+        "y": 4000080756859651,
+        "z": -138852092290275730
+      },
+      "securityStatus": -0.256904,
+      "position2D": {
+        "x": 371858226262931000,
+        "y": -205446533846923200
+      }
+    },
+    {
+      "id": 30000774,
+      "name": "MSG-BZ",
+      "regionId": 10000009,
+      "constellationId": 20000113,
+      "position": {
+        "x": 118743422424702850,
+        "y": 6232267243674778,
+        "z": -145133102454423170
+      },
+      "securityStatus": -0.276212,
+      "position2D": {
+        "x": 373912691601400200,
+        "y": -199283137831515520
+      }
+    }
+  ],
+  "regions": [
+    {
+      "id": 10000006,
+      "name": "Wicked Creek"
+    },
+    {
+      "id": 10000009,
+      "name": "Insmother"
+    }
+  ],
+  "constellations": [
+    {
+      "id": 20000077,
+      "name": "0FC-ZX",
+      "regionId": 10000006
+    },
+    {
+      "id": 20000078,
+      "name": "AC-RON",
+      "regionId": 10000006
+    },
+    {
+      "id": 20000080,
+      "name": "DJ-XCW",
+      "regionId": 10000006
+    },
+    {
+      "id": 20000113,
+      "name": "QA-P7J",
+      "regionId": 10000009
+    }
+  ],
+  "gates": [
+    {
+      "id": 50000076,
+      "systemId": 30000552,
+      "destinationId": 30000774,
+      "destinationGateId": 50001229
+    },
+    {
+      "id": 50000077,
+      "systemId": 30000552,
+      "destinationId": 30000557,
+      "destinationGateId": 50002115
+    },
+    {
+      "id": 50000133,
+      "systemId": 30000529,
+      "destinationId": 30000544,
+      "destinationGateId": 50001746
+    },
+    {
+      "id": 50000134,
+      "systemId": 30000529,
+      "destinationId": 30000557,
+      "destinationGateId": 50002116
+    },
+    {
+      "id": 50000135,
+      "systemId": 30000529,
+      "destinationId": 30000530,
+      "destinationGateId": 50002604
+    },
+    {
+      "id": 50000436,
+      "systemId": 30000772,
+      "destinationId": 30000773,
+      "destinationGateId": 50001041
+    },
+    {
+      "id": 50000464,
+      "systemId": 30000540,
+      "destinationId": 30000773,
+      "destinationGateId": 50001042
+    },
+    {
+      "id": 50000466,
+      "systemId": 30000540,
+      "destinationId": 30000544,
+      "destinationGateId": 50001747
+    },
+    {
+      "id": 50001041,
+      "systemId": 30000773,
+      "destinationId": 30000772,
+      "destinationGateId": 50000436
+    },
+    {
+      "id": 50001042,
+      "systemId": 30000773,
+      "destinationId": 30000540,
+      "destinationGateId": 50000464
+    },
+    {
+      "id": 50001043,
+      "systemId": 30000773,
+      "destinationId": 30000774,
+      "destinationGateId": 50001230
+    },
+    {
+      "id": 50001229,
+      "systemId": 30000774,
+      "destinationId": 30000552,
+      "destinationGateId": 50000076
+    },
+    {
+      "id": 50001230,
+      "systemId": 30000774,
+      "destinationId": 30000773,
+      "destinationGateId": 50001043
+    },
+    {
+      "id": 50001746,
+      "systemId": 30000544,
+      "destinationId": 30000529,
+      "destinationGateId": 50000133
+    },
+    {
+      "id": 50001747,
+      "systemId": 30000544,
+      "destinationId": 30000540,
+      "destinationGateId": 50000466
+    },
+    {
+      "id": 50002115,
+      "systemId": 30000557,
+      "destinationId": 30000552,
+      "destinationGateId": 50000077
+    },
+    {
+      "id": 50002116,
+      "systemId": 30000557,
+      "destinationId": 30000529,
+      "destinationGateId": 50000134
+    },
+    {
+      "id": 50002118,
+      "systemId": 30000557,
+      "destinationId": 30000536,
+      "destinationGateId": 50005263
+    },
+    {
+      "id": 50002604,
+      "systemId": 30000530,
+      "destinationId": 30000529,
+      "destinationGateId": 50000135
+    },
+    {
+      "id": 50002605,
+      "systemId": 30000530,
+      "destinationId": 30000531,
+      "destinationGateId": 50003033
+    },
+    {
+      "id": 50003033,
+      "systemId": 30000531,
+      "destinationId": 30000530,
+      "destinationGateId": 50002605
+    },
+    {
+      "id": 50003036,
+      "systemId": 30000531,
+      "destinationId": 30000536,
+      "destinationGateId": 50005264
+    },
+    {
+      "id": 50005263,
+      "systemId": 30000536,
+      "destinationId": 30000557,
+      "destinationGateId": 50002118
+    },
+    {
+      "id": 50005264,
+      "systemId": 30000536,
+      "destinationId": 30000531,
+      "destinationGateId": 50003036
+    }
+  ]
+}

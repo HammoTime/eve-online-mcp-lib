@@ -15,7 +15,7 @@ import {
   type PreparedMapScene,
 } from "./prepared.js";
 import { MAP_FONT, MAP_THEMES, ROUTE_DASHES } from "./themes.js";
-import { MAP_LIMITS, MapError } from "./types.js";
+import { MAP_CANVASES, MAP_LIMITS, MapError } from "./types.js";
 import type { MapRequest, RenderedMap } from "./types.js";
 
 function escapeXml(value: string): string {
@@ -54,6 +54,31 @@ export function renderPreparedMap(
   scene: PreparedMapScene,
   input?: MapRequest,
 ): RenderedMap {
+  const facts = readPreparedMapScene(scene, input);
+  try {
+    return renderScene(facts, facts.request.size);
+  } catch (error) {
+    if (
+      !(error instanceof MapError) ||
+      error.code !== "MAP_TOO_DENSE" ||
+      !facts.routes.length ||
+      facts.request.size === "large"
+    )
+      throw error;
+    const map = renderScene(facts, "large");
+    map.warnings.push({
+      code: "MAP_CANVAS_EXPANDED",
+      message:
+        "The route map uses a larger 3200×2000 canvas with extra padding to keep every system and label readable.",
+    });
+    return map;
+  }
+}
+
+function renderScene(
+  facts: ReturnType<typeof readPreparedMapScene>,
+  size: MapRequest["size"],
+): RenderedMap {
   const {
     request,
     source,
@@ -64,7 +89,7 @@ export function renderPreparedMap(
     pointsOfInterest,
     routes,
     legs,
-  } = readPreparedMapScene(scene, input);
+  } = facts;
   const boundary = request.boundary;
   const important = new Set([
     ...pointsOfInterest.map((poi) => poi.systemId),
@@ -129,26 +154,26 @@ export function renderPreparedMap(
     }
     labelText.set(system.id, lines);
   }
-  const width = request.size === "wide" ? 1600 : 1440;
-  const height = 900;
+  const { width, height, paddingX, paddingY } = MAP_CANVASES[size];
+  const extraHeight = height - 900;
   const hasRail = pointsOfInterest.length > 0;
   const panel: Box = {
     x: 40,
     y: 170,
     width: hasRail ? width - 478 : width - 80,
-    height: 558,
+    height: 558 + extraHeight,
   };
   const plot: Box = {
-    x: panel.x + 42,
-    y: panel.y + 46,
-    width: panel.width - 84,
-    height: 450,
+    x: panel.x + paddingX,
+    y: panel.y + paddingY,
+    width: panel.width - 2 * paddingX,
+    height: panel.height - 2 * paddingY - 16,
   };
   const labelArea: Box = {
     x: panel.x + 14,
     y: panel.y + 18,
     width: panel.width - 28,
-    height: 502,
+    height: 502 + extraHeight,
   };
   const layout = layoutMap(
     systems,
@@ -258,7 +283,7 @@ export function renderPreparedMap(
     `<metadata>${escapeXml(JSON.stringify({ schemaVersion: 1, source, summary, layout: layoutSummary, projectionBounds: layout.bounds, completeness, warnings }))}</metadata>`,
   );
   svg.push(
-    `<rect width="${width}" height="${height}" rx="28" fill="${theme.background}"/><rect x="20" y="20" width="${width - 40}" height="860" rx="24" fill="none" stroke="${theme.frame}" stroke-width="1.5" data-frame="outer"/>`,
+    `<rect width="${width}" height="${height}" rx="28" fill="${theme.background}"/><rect x="20" y="20" width="${width - 40}" height="${height - 40}" rx="24" fill="none" stroke="${theme.frame}" stroke-width="1.5" data-frame="outer"/>`,
   );
   wrapped(title, 48, 70, 32, width - 100, 1, theme.text);
   wrapped(boundaryLabel, 48, 106, 20, width - 100, 1, theme.muted);
@@ -391,14 +416,14 @@ export function renderPreparedMap(
   }
   text(
     60,
-    712,
+    712 + extraHeight,
     `${layout.used === "atlas" ? "Atlas / not to scale" : "X/Z projection"} | ${systems.length} systems | ${boundaryConnections} external links | ${layout.omittedLabels} hidden labels`,
     18,
     theme.muted,
   );
   text(
     48,
-    760,
+    760 + extraHeight,
     "Gate counts: outbound | Routes: arrows + R numbers | Rings: endpoints",
     18,
     theme.muted,
@@ -406,13 +431,13 @@ export function renderPreparedMap(
   if (!routes.length)
     text(
       48,
-      800,
+      800 + extraHeight,
       "No routes supplied. No destinations selected by this renderer.",
       18,
       theme.muted,
     );
   routes.forEach((route, index) => {
-    const y = 793 + index * 25;
+    const y = 793 + extraHeight + index * 25;
     const color = present(theme.routes[index]);
     const dash = present(ROUTE_DASHES[index]);
     text(50, y, `R${index + 1}`, 18, color);
@@ -433,7 +458,7 @@ export function renderPreparedMap(
     const railX = width - 414;
     const railWidth = 374;
     svg.push(
-      `<g data-poi-list="true"><rect x="${railX}" y="170" width="${railWidth}" height="674" rx="22" fill="${theme.rail}" stroke="${theme.frame}"/>`,
+      `<g data-poi-list="true"><rect x="${railX}" y="170" width="${railWidth}" height="${674 + extraHeight}" rx="22" fill="${theme.rail}" stroke="${theme.frame}"/>`,
     );
     text(railX + 22, 207, "POINTS OF INTEREST", 20, theme.text);
     text(railX + 22, 235, "Caller annotations / P numbers", 18, theme.muted);
@@ -450,7 +475,7 @@ export function renderPreparedMap(
         labelLines.length * 28 +
         (contextLines.length + noteLines.length) * 24 +
         18;
-      if (y + required > 834)
+      if (y + required > 834 + extraHeight)
         tooDense(
           "The complete points-of-interest list does not fit at readable size. Shorten notes or supply fewer points; no annotations were truncated.",
         );
@@ -485,7 +510,7 @@ export function renderPreparedMap(
   wrapped(
     `SDE build ${source.buildNumber} / ${source.releaseDate} | Sec ~2dp; raw in tooltips; no safety classification`,
     48,
-    873,
+    873 + extraHeight,
     18,
     width - 100,
     1,

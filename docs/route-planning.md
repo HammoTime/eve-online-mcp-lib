@@ -46,14 +46,21 @@ boundaries and caller-selected annotations, without route overlays. Internal
 rendering APIs continue to accept validated ordered paths for planner use/tests.
 
 Geographic/atlas rendering may use the current geometry only if its source
-identity matches the plan. Dense, oversized-for-atlas, or changed-snapshot maps
-fall back to numbered itinerary pages rendered entirely by the MCP. Each page
-contains at most 25 consecutive visits, with one overlapping boundary visit on
-the next page so every jump is visible. Page indices, total pages, continuation,
-global visit numbers, and total jumps come from the server. Rendering never
-changes or reoptimizes the plan. The full plan is preserved even if a PNG preview
-fails. Missing/expired route IDs require replanning; callers cannot supply a
-replacement path under the old ID.
+identity matches the plan. Crowded route maps retry once on a 3200×2000 canvas
+with extra padding, preserving natural text size, collision checks and every
+route step. `size:"large"` explicitly requests that canvas, including for context
+maps; standard and wide remain 1440×900 and 1600×900. The larger canvas expands
+the plotted geometry rather than scaling an already crowded image.
+
+Itinerary images and page inputs have been removed. Routes over 100 visits,
+irreducibly dense maps or changed/unavailable geometry return explicit errors
+with complete `routeText`, `waypointText`, counts and the stored source metadata.
+No image is published on that failure. The JSON plan remains in the existing
+private artifact envelope; its inert one-pixel SVG is a storage compatibility
+placeholder, never a map response or PNG input. Rendering never changes or
+reoptimizes the plan. The full plan and any successfully generated SVG remain
+available if PNG previewing fails. Missing/expired route IDs require replanning;
+callers cannot supply a replacement path under the old ID.
 
 ## Host integration and privacy
 
@@ -77,9 +84,11 @@ assistant. Missing evidence remains an explicit failure, not zero progress.
 Tests cover directed/disconnected graphs, exact optimizer agreement with an
 independent small brute-force oracle, shared transit/duplicate stops, stable ties,
 constraints, cancellation, bounds, publication completeness, route-handle expiry
-and ownership, raw-path rejection, dense-map fallback, page continuity, and
-closed diagnostics. The seven-stop pickup-loop failure is represented with
-synthetic public fixtures, not private historical asset exports.
+and ownership, raw-path rejection, expanded map geometry, complete text on
+rendering failure, and closed diagnostics. The C-J6MT circuit regression uses
+public CCP SDE build 3532181 with its verified 12-jump planner result; geometry
+checks cover every node, label, arrow and repeated return traversal. The seven-stop
+pickup-loop failure uses synthetic fixtures, not private historical asset exports.
 
 Library and both consumer validation gates must pass. Source integration remains
 uncommitted until a validated library commit is authorized and available remotely;

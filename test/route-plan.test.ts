@@ -6,10 +6,7 @@ import {
   routePlanSchema,
   validateRouteGraph,
 } from "../src/route-plan.js";
-import {
-  itineraryPage,
-  renderItinerary,
-} from "../src/cartography/itinerary.js";
+import { createRouteArtifact } from "../src/cartography/route-artifact.js";
 import {
   projectInput,
   projectOutput,
@@ -31,17 +28,10 @@ describe("exact server-owned routing", () => {
       ...Array.from({ length: 32 }, (_, i) => 32 - i),
     ]);
     expect(plan.optimality).toBe("exact");
-    const pages = Array.from({ length: 3 }, (_, page) =>
-      itineraryPage(plan, page),
-    );
-    expect(pages.map((p) => p.path.length)).toEqual([25, 25, 17]);
-    expect(pages.flatMap((p, i) => (i ? p.path.slice(1) : p.path))).toEqual(
-      plan.path,
-    );
-    const map = renderItinerary(plan, 2, "light");
-    expect(map.svg).toContain("Visit 65 / FINISH");
-    expect(map.routePlan).toEqual(plan);
-    expect(map.completeness.omittedLabels).toBe(0);
+    const artifact = createRouteArtifact(plan);
+    expect(artifact.routePlan).toEqual(plan);
+    expect(artifact.layout.used).toBe("plan");
+    expect(artifact.svg).not.toContain("Visit");
   });
   it("honors directions, exclusions and raw-security constraints without inferred repairs", () => {
     const graph = routeFixture();
@@ -83,9 +73,6 @@ describe("exact server-owned routing", () => {
         .totalJumps,
     ).toBe(6);
     expect(planRoute(graph, { origin: 1, destination: 1 }).path).toEqual([1]);
-    expect(
-      itineraryPage(planRoute(graph, { origin: 1, destination: 1 })).pageCount,
-    ).toBe(1);
   });
   it("resolves only exact names and keeps ambiguity explicit", () => {
     const graph = routeFixture();
@@ -212,7 +199,7 @@ describe("exact server-owned routing", () => {
       ).toBe(expected);
     }
   });
-  it("validates stored plans and rejects unavailable itinerary pages", () => {
+  it("validates stored plans", () => {
     const plan = planRoute(routeFixture(), { origin: 1, destination: 4 });
     expect(routePlanSchema.safeParse({ ...plan, totalJumps: 99 }).success).toBe(
       false,
@@ -229,8 +216,6 @@ describe("exact server-owned routing", () => {
     expect(routePlanSchema.safeParse({ ...plan, avoid: [2] }).success).toBe(
       false,
     );
-    expect(() => itineraryPage(plan, 1)).toThrow("outside");
-    expect(() => itineraryPage(plan, -1)).toThrow("outside");
   });
   it("keeps names, route handles, stop arrays and paths out of diagnostic projections", () => {
     expect(TOOL_NAMES.has("plan_eve_route")).toBe(true);

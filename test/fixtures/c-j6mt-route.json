@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "algorithm": "BFS + Held-Karp",
+  "objective": "minimum_jumps",
+  "optimality": "exact",
+  "snapshotId": "daddcdccf841bfc32a6a4f720a78f887075577bdc7c664287a58eb0aa6b8f955",
+  "source": {
+    "buildNumber": 3532181,
+    "releaseDate": "2026-09-22T11:08:58Z",
+    "sourceUrl": "https://developers.eveonline.com/static-data/tranquility/eve-online-static-data-3532181-jsonl.zip",
+    "fetchedAt": "2026-09-22T12:53:54.043Z",
+    "checkedAt": "2026-09-22T12:53:54.540Z",
+    "stale": false
+  },
+  "stopOrder": "as_given",
+  "origin": 30000772,
+  "destination": 30000772,
+  "requestedStops": [30000552, 30000531, 30000530, 30000540],
+  "avoid": [],
+  "systems": [
+    {
+      "id": 30000529,
+      "name": "MKIG-5",
+      "securityStatus": -0.221997
+    },
+    {
+      "id": 30000530,
+      "name": "YHEN-G",
+      "securityStatus": -0.199527
+    },
+    {
+      "id": 30000531,
+      "name": "E-JCUS",
+      "securityStatus": -0.215627
+    },
+    {
+      "id": 30000536,
+      "name": "4F89-U",
+      "securityStatus": -0.245349
+    },
+    {
+      "id": 30000540,
+      "name": "L-FM3P",
+      "securityStatus": -0.170869
+    },
+    {
+      "id": 30000544,
+      "name": "GM-50Y",
+      "securityStatus": -0.166767
+    },
+    {
+      "id": 30000552,
+      "name": "GPLB-C",
+      "securityStatus": -0.254697
+    },
+    {
+      "id": 30000557,
+      "name": "6-L4YC",
+      "securityStatus": -0.241496
+    },
+    {
+      "id": 30000772,
+      "name": "C-J6MT",
+      "securityStatus": -0.288745
+    },
+    {
+      "id": 30000773,
+      "name": "78-0R6",
+      "securityStatus": -0.256904
+    },
+    {
+      "id": 30000774,
+      "name": "MSG-BZ",
+      "securityStatus": -0.276212
+    }
+  ],
+  "path": [
+    30000772, 30000773, 30000774, 30000552, 30000557, 30000536, 30000531,
+    30000530, 30000529, 30000544, 30000540, 30000773, 30000772
+  ],
+  "stopSequence": [30000772, 30000552, 30000531, 30000530, 30000540, 30000772],
+  "legs": [
+    {
+      "from": 30000772,
+      "to": 30000552,
+      "start": 0,
+      "end": 3,
+      "jumps": 3
+    },
+    {
+      "from": 30000552,
+      "to": 30000531,
+      "start": 3,
+      "end": 6,
+      "jumps": 3
+    },
+    {
+      "from": 30000531,
+      "to": 30000530,
+      "start": 6,
+      "end": 7,
+      "jumps": 1
+    },
+    {
+      "from": 30000530,
+      "to": 30000540,
+      "start": 7,
+      "end": 10,
+      "jumps": 3
+    },
+    {
+      "from": 30000540,
+      "to": 30000772,
+      "start": 10,
+      "end": 12,
+      "jumps": 2
+    }
+  ],
+  "totalJumps": 12
+}
