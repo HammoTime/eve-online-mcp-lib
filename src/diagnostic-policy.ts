@@ -1,7 +1,6 @@
 import type { Attributes } from "@opentelemetry/api";
 
 export const TOOL_NAMES = new Set([
-  "initialize_static_data",
   "resolve_skill_plan_targets",
   "get_skill_dependencies",
   "generate_skill_plan",

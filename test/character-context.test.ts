@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { TokenProvider } from "../src/auth.js";
+import { AuthenticationError, type TokenProvider } from "../src/auth.js";
 import { getCharacterContext } from "../src/character-context.js";
 import { EsiClient } from "../src/esi-client.js";
 import { loadOpenApiDocument, OperationCatalog } from "./openapi-fixture.js";
@@ -25,6 +25,73 @@ function clientWith(
 }
 
 describe("character context", () => {
+  it.each([false, true])(
+    "retains allowed private sections when another scope is missing (provider rejection: %s)",
+    async (rejectAtProvider) => {
+      const allowed = "esi-skills.read_skills.v1";
+      const missing = "esi-wallet.read_character_wallet.v1";
+      const provider = {
+        getAccessToken: vi.fn((scopes: string[] = []) => {
+          if (rejectAtProvider && scopes.includes(missing))
+            return Promise.reject(
+              new AuthenticationError(
+                "Missing wallet scope",
+                "MISSING_SCOPES",
+                { missingScopes: [missing] },
+              ),
+            );
+          return Promise.resolve(jwt([allowed]));
+        }),
+      };
+      const fetchImplementation = vi.fn<typeof fetch>(() =>
+        Promise.resolve(Response.json({ skills: [], total_sp: 0 })),
+      );
+      const result = await getCharacterContext(
+        clientWith(provider, fetchImplementation),
+        catalog,
+        { characterId: 42, sections: ["skills", "wallet"] },
+      );
+      expect(result).toMatchObject({
+        status: "partial",
+        sections: {
+          skills: { status: "ok" },
+          wallet: {
+            status: "error",
+            error: {
+              code: "MISSING_SCOPES",
+              details: { missingScopes: [missing] },
+            },
+          },
+        },
+      });
+      expect(fetchImplementation).toHaveBeenCalledOnce();
+      expect(provider.getAccessToken).toHaveBeenCalledTimes(2);
+      expect(provider.getAccessToken).toHaveBeenLastCalledWith([allowed], 42);
+    },
+  );
+
+  it("fails closed if the reduced authorization changes character or fails", async () => {
+    for (const failure of [
+      new Error("consent declined"),
+      new AuthenticationError("Changed character", "CHARACTER_MISMATCH"),
+    ]) {
+      const provider = {
+        getAccessToken: vi
+          .fn<TokenProvider["getAccessToken"]>()
+          .mockResolvedValueOnce(jwt(["esi-skills.read_skills.v1"]))
+          .mockRejectedValueOnce(failure),
+      };
+      const fetchImplementation = vi.fn<typeof fetch>();
+      const result = await getCharacterContext(
+        clientWith(provider, fetchImplementation),
+        catalog,
+        { characterId: 42, sections: ["skills", "wallet"] },
+      );
+      expect(result.status).toBe("failed");
+      expect(fetchImplementation).not.toHaveBeenCalled();
+      expect(provider.getAccessToken).toHaveBeenCalledTimes(2);
+    }
+  });
   it("fetches only selected public sections without authentication", async () => {
     const provider = {
       getAccessToken: vi.fn<TokenProvider["getAccessToken"]>(),

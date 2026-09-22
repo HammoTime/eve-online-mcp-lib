@@ -14,7 +14,6 @@ describe("skill-plan prompt guidance", () => {
       goal: "I want to fly Jump Freighters",
     });
     for (const tool of [
-      "initialize_static_data",
       "resolve_skill_plan_targets",
       "get_skill_dependencies",
       "generate_skill_plan",
