@@ -267,6 +267,20 @@ describe("renderer-only map MCP", () => {
     }
     expect(services.data.initialize).not.toHaveBeenCalled();
   });
+  it("does not render or attach a PNG unless explicitly requested", async () => {
+    const { client, services } = await setup({ preview: "ready" });
+    const { preview: _preview, ...withoutPreview } = request;
+    expect(_preview).toBe("none");
+    const result = await client.callTool({
+      name: "render_eve_map",
+      arguments: withoutPreview,
+    });
+    expect(result.structuredContent).toMatchObject({
+      preview: { status: "not_requested" },
+    });
+    expect(result.content.some((block) => block.type === "image")).toBe(false);
+    expect(services.preview?.render).not.toHaveBeenCalled();
+  });
   it("returns the original SVG resource, framed boundary and POI list without changing supplied routes", async () => {
     const { client, services } = await setup();
     const result = await client.callTool({

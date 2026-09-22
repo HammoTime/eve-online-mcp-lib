@@ -17,7 +17,12 @@ import {
   getCharacterContext,
   type CharacterSection,
 } from "./character-context.js";
-import { EsiClient, publicEsiError, type EsiCallInput } from "./esi-client.js";
+import {
+  EsiClient,
+  EsiRequestError,
+  publicEsiError,
+  type EsiCallInput,
+} from "./esi-client.js";
 import { resolveEveEntities } from "./entity-resolution.js";
 import { getMarketSnapshot } from "./market-snapshot.js";
 import { operationGuidance } from "./operation-metadata.js";
@@ -34,6 +39,19 @@ import { planTargetSchema, targetListSchema } from "./skill-data.js";
 import { MAP_INSTRUCTIONS, registerCartography } from "./cartography/mcp.js";
 import type { CartographyServices } from "./cartography/service.js";
 import { toolOutputSchemas } from "./tool-output-schemas.js";
+import { compactOutputSchema } from "./output-schema.js";
+import {
+  defaultZKillboardClient,
+  ZKillboardClient,
+  zkillmailIdSchema,
+  zkillmailSearchSchema,
+} from "./zkillboard.js";
+import {
+  jsonBytes,
+  MODEL_RESULT_BYTES,
+  pageJson,
+  responseSelectionSchema,
+} from "./response-budget.js";
 
 const jsonRecord = z.record(z.string(), z.json()).optional();
 const positiveSafeInteger = z
@@ -56,12 +74,36 @@ const SERVER_INSTRUCTIONS = [
   "Resolve exact names to character-category IDs; keep ambiguous or unresolved matches explicit. Use an explicit character ID and request only the sections needed. For other endpoints, search_esi_operations, then get_esi_operation, then call_esi retrieves one page of a read-only operation.",
   "Public operations need no login. Protected character sections require EVE SSO with the appropriate scopes. Report each section's errors and freshness; public profile success does not establish access to protected data.",
   "Skills and skill queues can inform training and hauling plans. ESI does not expose Omega subscription status or saved in-game skill plans. Skill injector advice needs current game rules and explicit assumptions; this server cannot change skills, queues or game state. Use another source or an in-game check for information ESI does not expose.",
+  "Responses have a separate model byte/row budget. output.complete describes only the selected value, not upstream completeness. For details, repeat the same tool inputs with response.path from output.omitted; for another slice use response.offset=output.nextOffset and response.snapshot=output.snapshot. Keep all original inputs, including call_esi.actingCharacterId. Changed evidence requires restarting. Finish slices of the current ESI page before following pagination.nextCall. Empty partial slices are not empty facts. Skill plans default to plan rows; response.path selects graph, retainedQueue, acquisitionChecks or trainingText independently.",
+  "Use search_zkillmails for public zKillboard combat records after resolving entity IDs, and get_zkillmail for a known killmail ID. These require no EVE login and provide delayed, incomplete historical evidence, never live intelligence or a safety guarantee. Finish model response slices before advancing the upstream page.",
 ].join("\n");
 
+async function characterResult(
+  result: Awaited<ReturnType<CharacterAuthentication["list"]>>,
+  includeScopes = false,
+  response?: z.input<typeof responseSelectionSchema>,
+) {
+  const { characters, ...status } = result;
+  const rows = characters.map(({ scopes, ...character }) => ({
+    ...character,
+    scopeCount: scopes.length,
+    ...(includeScopes ? { scopes } : {}),
+  }));
+  const page = await pageJson(rows, response);
+  return { ...status, characters: page.data, output: page.output };
+}
+
 function textResult(value: unknown, isError = false) {
+  if (jsonBytes(value) > MODEL_RESULT_BYTES)
+    throw new EsiRequestError(
+      "Model-facing response exceeds 24000 bytes. Request fewer inputs or a narrower response.path.",
+      undefined,
+      undefined,
+      { code: "RESPONSE_LIMIT", retryable: false },
+    );
   attributes(projectOutput(value));
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(value) }],
     structuredContent: value as Record<string, unknown>,
     _meta: diagnosticMetadata(),
     ...(isError ? { isError: true as const } : {}),
@@ -70,9 +112,17 @@ function textResult(value: unknown, isError = false) {
 
 function sharedErrorResult(error: unknown) {
   recordError(error);
-  const body = publicEsiError(error);
+  let body = publicEsiError(error);
+  if (jsonBytes(body) > MODEL_RESULT_BYTES) {
+    body = {
+      ...body,
+      error: "Error details exceeded the model response budget.",
+      details: null,
+      suggestedAction: "Narrow the request before retrying.",
+    };
+  }
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(body, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(body) }],
     structuredContent: body,
     _meta: diagnosticMetadata(),
     isError: true as const,
@@ -89,6 +139,7 @@ export function createEveServer(
     hostedAuthorizationUrl?: string;
     protocolVersionHint?: string;
     cartography?: CartographyServices;
+    zkillboard?: ZKillboardClient;
   },
 ): McpServer {
   const { authentication } = options;
@@ -129,10 +180,70 @@ export function createEveServer(
   };
 
   const planner = new SkillPlanner(staticData, client);
+  const zkillboard = options.zkillboard ?? defaultZKillboardClient();
+  server.registerTool(
+    "search_zkillmails",
+    {
+      title: "Search EVE Online zKillboard killmails",
+      description:
+        "Search public EVE Online zKillboard history by resolved entity ID. Delayed, incomplete; no EVE login. Finish response slices before pagination.nextPage.",
+      inputSchema: zkillmailSearchSchema.extend({
+        response: responseSelectionSchema.optional(),
+      }),
+      outputSchema: compactOutputSchema(toolOutputSchemas.search_zkillmails),
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    async ({ response, ...query }) =>
+      withSpan(
+        "eve.tool.search_zkillmails",
+        { "gen_ai.tool.name": "search_zkillmails" },
+        async () => {
+          try {
+            const { data, ...source } = await zkillboard.search(query);
+            return textResult({
+              ...source,
+              ...(await pageJson(data, response, undefined, query)),
+            });
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      ),
+  );
+  server.registerTool(
+    "get_zkillmail",
+    {
+      title: "Get an EVE Online zKillboard killmail",
+      description:
+        "Read a public EVE Online zKillboard killmail by ID; no EVE login. Use response.path for attackers/items. Missing records do not prove no loss.",
+      inputSchema: zkillmailIdSchema.extend({
+        response: responseSelectionSchema.optional(),
+      }),
+      outputSchema: compactOutputSchema(toolOutputSchemas.get_zkillmail),
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    async ({ response, ...query }) =>
+      withSpan(
+        "eve.tool.get_zkillmail",
+        { "gen_ai.tool.name": "get_zkillmail" },
+        async () => {
+          try {
+            const { data, ...source } = await zkillboard.get(query);
+            return textResult({
+              ...source,
+              ...(await pageJson(data, response, undefined, query)),
+            });
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      ),
+  );
   const targetsSchema = z
     .object({
       target: planTargetSchema.optional(),
       targets: targetListSchema.optional(),
+      response: responseSelectionSchema.optional(),
     })
     .strict()
     .refine(
@@ -144,9 +255,11 @@ export function createEveServer(
     {
       title: "Initialize EVE Online static data",
       description:
-        "Initialize the configured CCP EVE Online static-data source and report its build and freshness. Refresh requests check for updates; a failed refresh may return a labelled older build. Public data needs no authentication. Planning also initializes automatically.",
+        "Initialize public CCP EVE Online static data; report build and freshness. Refresh checks for updates and labels stale fallback. No login. Planning initializes automatically.",
       inputSchema: z.object({ refresh: z.boolean().default(false) }).strict(),
-      outputSchema: toolOutputSchemas.initialize_static_data,
+      outputSchema: compactOutputSchema(
+        toolOutputSchemas.initialize_static_data,
+      ),
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ refresh }) => {
@@ -175,10 +288,12 @@ export function createEveServer(
       description:
         "Resolve public EVE Online SDE skill/ship names or type IDs deterministically before planning. Accepts Mining II, an exact hull, or Exhumer (unique singular skill alias). Bare skills default to level I. Unresolved/ambiguous inputs return candidates; never choose a hull or desired skill level for the user.",
       inputSchema: targetsSchema,
-      outputSchema: toolOutputSchemas.resolve_skill_plan_targets,
+      outputSchema: compactOutputSchema(
+        toolOutputSchemas.resolve_skill_plan_targets,
+      ),
       annotations: READ_ONLY_ANNOTATIONS,
     },
-    async ({ target, targets }) => {
+    async ({ target, targets, response }) => {
       return withSpan(
         "eve.tool.resolve_skill_plan_targets",
         { "gen_ai.tool.name": "resolve_skill_plan_targets" },
@@ -187,11 +302,16 @@ export function createEveServer(
             const snapshot = await staticData.initialize();
             const { catalog, status } = snapshot;
             try {
+              const page = await pageJson(
+                (targets ?? (target === undefined ? [] : [target])).map(
+                  (value) => catalog.resolve(value),
+                ),
+                response,
+              );
               return textResult({
                 staticData: status,
-                targets: (
-                  targets ?? (target === undefined ? [] : [target])
-                ).map((value) => catalog.resolve(value)),
+                targets: page.data,
+                output: page.output,
               });
             } finally {
               snapshot.release?.();
@@ -208,22 +328,35 @@ export function createEveServer(
     {
       title: "Map EVE Online skill prerequisite dependencies",
       description:
-        "Return the complete prerequisite skill-level graph for verified EVE Online SDE skill or ship targets, with directed prerequisite-to-dependent edges, deterministic topological order and cycle detection. No character data or login is used. A ship means minimum hull requirements, not fit viability.",
+        "Return bounded prerequisite graph details for verified EVE Online SDE skill or ship targets. Computation includes the complete graph, topological order and cycle detection. Use response.path=[nodes] or [edges] for omitted collections. No character data or login is used. A ship means minimum hull requirements, not fit viability.",
       inputSchema: targetsSchema,
-      outputSchema: toolOutputSchemas.get_skill_dependencies,
+      outputSchema: compactOutputSchema(
+        toolOutputSchemas.get_skill_dependencies,
+      ),
       annotations: READ_ONLY_ANNOTATIONS,
     },
-    async ({ target, targets }) => {
+    async ({ target, targets, response }) => {
       return withSpan(
         "eve.tool.get_skill_dependencies",
         { "gen_ai.tool.name": "get_skill_dependencies" },
         async () => {
           try {
-            return textResult(
-              await planner.dependencies(
-                targets ?? (target === undefined ? [] : [target]),
-              ),
+            const result = await planner.dependencies(
+              targets ?? (target === undefined ? [] : [target]),
             );
+            if (result.status !== "complete") return textResult(result);
+            const { graph, ...summary } = result;
+            return textResult({
+              ...summary,
+              counts: {
+                graphNodes: graph.nodes.length,
+                graphEdges: graph.edges.length,
+              },
+              ...(await pageJson(graph, response, undefined, {
+                targets: result.resolvedTargets,
+                build: result.staticData.buildNumber,
+              })),
+            });
           } catch (error) {
             return errorResult(error);
           }
@@ -236,13 +369,14 @@ export function createEveServer(
     {
       title: "Generate a verified character-specific EVE Online skill plan",
       description:
-        "Generate a deterministic EVE Online prerequisite-ordered training plan for target(s), such as Mining II, Exhumer, or an exact ship name/ID. Requires explicit characterId and complete scoped skills/queue data. Removes completed permanent skill levels, deduplicates shared dependencies, handles preserve/reorder queue policy, replays dependencies, and returns copyable training text plus estimated missing SP. Does not edit game state or calculate clone eligibility, fitting, training time or optimal milestone timing. Resolve vague goals with plan_eve_skills and resolve_skill_plan_targets first.",
+        "Generate a deterministic EVE Online prerequisite-ordered training plan for verified targets and explicit characterId. Complete scoped skills/queue evidence is required. Default data is compact plan rows with totals, queue policy and caveats. Request response.path=[graph], [retainedQueue], [trainingText] or [acquisitionChecks] separately; follow output for bounded details. Computation removes permanent trained levels, preserves/reorders queue commitments and replays dependencies. Does not edit game state or calculate clone eligibility, fit validity or training time.",
       inputSchema: z
         .object({
           characterId: positiveSafeInteger,
           target: planTargetSchema.optional(),
           targets: targetListSchema.optional(),
           queuePolicy: z.enum(["preserve", "reorder"]).default("preserve"),
+          response: responseSelectionSchema.optional(),
         })
         .strict()
         .refine(
@@ -250,22 +384,75 @@ export function createEveServer(
             (value.target === undefined) !== (value.targets === undefined),
           "Supply exactly one of target or targets",
         ),
-      outputSchema: toolOutputSchemas.generate_skill_plan,
+      outputSchema: compactOutputSchema(toolOutputSchemas.generate_skill_plan),
       annotations: READ_ONLY_ANNOTATIONS,
     },
-    async ({ characterId, target, targets, queuePolicy }) => {
+    async ({ characterId, target, targets, queuePolicy, response }) => {
       return withSpan(
         "eve.tool.generate_skill_plan",
         { "gen_ai.tool.name": "generate_skill_plan" },
         async () => {
           try {
-            return textResult(
-              await planner.generate({
-                characterId,
-                targets: targets ?? (target === undefined ? [] : [target]),
-                queuePolicy,
-              }),
-            );
+            const result = await planner.generate({
+              characterId,
+              targets: targets ?? (target === undefined ? [] : [target]),
+              queuePolicy,
+            });
+            if (result.status !== "complete") return textResult(result);
+            const {
+              plan,
+              graph,
+              retainedQueue,
+              trainingText,
+              acquisitionChecks,
+              ...summary
+            } = result;
+            const details = {
+              plan: plan.map(
+                ({
+                  skillId,
+                  level,
+                  name,
+                  observedTrainedLevel,
+                  observedActiveLevel,
+                  baselineLevel,
+                  remainingSkillPointsEstimate,
+                }) => ({
+                  skillId,
+                  level,
+                  name,
+                  observedTrainedLevel,
+                  observedActiveLevel,
+                  baselineLevel,
+                  remainingSkillPointsEstimate,
+                }),
+              ),
+              graph,
+              retainedQueue,
+              trainingText,
+              acquisitionChecks,
+            };
+            return textResult({
+              ...summary,
+              counts: {
+                plan: plan.length,
+                retainedQueue: retainedQueue.length,
+                acquisitionChecks: acquisitionChecks.length,
+                graphNodes: graph.nodes.length,
+                graphEdges: graph.edges.length,
+              },
+              ...(await pageJson(
+                details,
+                { ...response, path: response?.path ?? ["plan"] },
+                undefined,
+                {
+                  characterId,
+                  queuePolicy,
+                  targets: result.resolvedTargets,
+                  build: result.staticData.buildNumber,
+                },
+              )),
+            });
           } catch (error) {
             return errorResult(error);
           }
@@ -286,18 +473,29 @@ export function createEveServer(
     {
       title: "List authorized EVE Online characters",
       description:
-        "List authorized EVE Online character IDs, names, granted scopes, and the default character. Contains no tokens. Public ESI data never needs login; protected requests use the host’s character authorization flow. Use authorize_eve_character to renew consent or fix missing scopes.",
-      inputSchema: z.object({}),
-      outputSchema: toolOutputSchemas.list_eve_characters,
+        "List authorized EVE Online character IDs, names, scope counts and the default character. Set includeScopes=true for granted scope details. Contains no tokens. Public ESI data never needs login. Use authorize_eve_character to renew consent or fix missing scopes.",
+      inputSchema: z
+        .object({
+          includeScopes: z.boolean().default(false),
+          response: responseSelectionSchema.optional(),
+        })
+        .strict(),
+      outputSchema: compactOutputSchema(toolOutputSchemas.list_eve_characters),
       annotations: { ...READ_ONLY_ANNOTATIONS, openWorldHint: false },
     },
-    async () => {
+    async ({ includeScopes, response }) => {
       return withSpan(
         "eve.tool.list_eve_characters",
         { "gen_ai.tool.name": "list_eve_characters" },
         async () => {
           try {
-            return textResult(await requireAuthentication().list());
+            return textResult(
+              await characterResult(
+                await requireAuthentication().list(),
+                includeScopes,
+                response,
+              ),
+            );
           } catch (error) {
             return errorResult(error);
           }
@@ -312,7 +510,9 @@ export function createEveServer(
       description:
         "Start the host’s EVE Online SSO authorization flow for the requested character. Hosted servers return a browser authorization link; local servers open the browser. Use when authorization is missing, expired, revoked, or lacks scopes. Tell the user to select this character in the browser; they never need commands or tokens. A different character selection is rejected without replacing saved credentials. Grants only the pinned read-only ESI scopes and does not change game state. Retry the protected request after success.",
       inputSchema: z.object({ characterId: positiveSafeInteger }),
-      outputSchema: toolOutputSchemas.authorize_eve_character,
+      outputSchema: compactOutputSchema(
+        toolOutputSchemas.authorize_eve_character,
+      ),
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -326,8 +526,9 @@ export function createEveServer(
         { "gen_ai.tool.name": "authorize_eve_character" },
         async () => {
           try {
+            const result = await requireAuthentication().authorize(characterId);
             return textResult(
-              await requireAuthentication().authorize(characterId),
+              "characters" in result ? await characterResult(result) : result,
             );
           } catch (error) {
             return errorResult(error);
@@ -343,7 +544,7 @@ export function createEveServer(
       description:
         "Choose an already authorized EVE Online character for protected operations without a character_id path parameter, such as corporation or structure requests. Character-specific operations always use their requested character. Changes only the current session default, without changing game state or granting corporation roles.",
       inputSchema: z.object({ characterId: positiveSafeInteger }),
-      outputSchema: toolOutputSchemas.select_eve_character,
+      outputSchema: compactOutputSchema(toolOutputSchemas.select_eve_character),
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -358,7 +559,9 @@ export function createEveServer(
         async () => {
           try {
             return textResult(
-              await requireAuthentication().select(characterId),
+              await characterResult(
+                await requireAuthentication().select(characterId),
+              ),
             );
           } catch (error) {
             return errorResult(error);
@@ -373,7 +576,7 @@ export function createEveServer(
     {
       title: "Search EVE Online data operations",
       description:
-        "Find read-only EVE Online ESI data for character skills and training queues, assets, corporations, markets, industry, routes and other game-data questions. Search by natural-language keywords, exact tag or authentication requirement. Start here when no focused tool fits, then inspect the chosen operation with get_esi_operation and retrieve it with call_esi.",
+        "Find read-only EVE Online ESI data for character skills, training queues, assets, corporations, markets, industry and routes. Search keywords, tag or authentication. When no focused tool fits, use get_esi_operation then call_esi.",
       inputSchema: z.object({
         query: z
           .string()
@@ -393,10 +596,12 @@ export function createEveServer(
           .describe(
             "true for character/corporation data; false for public data",
           ),
-        limit: z.number().int().min(1).max(100).default(20),
+        limit: z.number().int().min(1).max(25).default(10),
         offset: z.number().int().min(0).default(0),
       }),
-      outputSchema: toolOutputSchemas.search_esi_operations,
+      outputSchema: compactOutputSchema(
+        toolOutputSchemas.search_esi_operations,
+      ),
       annotations: READ_ONLY_ANNOTATIONS,
     },
     ({ query, tag, authenticated, limit, offset }) => {
@@ -413,7 +618,9 @@ export function createEveServer(
           });
           const operations = result.matches.map(
             ({ operation, matchReasons }) => ({
-              ...publicOperation(operation),
+              operationId: operation.operationId,
+              summary: operation.summary,
+              authenticated: operation.requiredScopes.length > 0,
               matchReasons,
             }),
           );
@@ -437,7 +644,7 @@ export function createEveServer(
       description:
         "Inspect one read-only EVE Online ESI operation found with search_esi_operations before calling call_esi. Return its exact path/query/header parameters, request-body schema, OAuth scopes, cache hints and rate-limit metadata.",
       inputSchema: z.object({ operationId: z.string().min(1) }),
-      outputSchema: toolOutputSchemas.get_esi_operation,
+      outputSchema: compactOutputSchema(toolOutputSchemas.get_esi_operation),
       annotations: READ_ONLY_ANNOTATIONS,
     },
     ({ operationId }) => {
@@ -471,7 +678,7 @@ export function createEveServer(
     {
       title: "Retrieve read-only EVE Online ESI data",
       description:
-        "Retrieve EVE Online data with one request/page for a catalogued ESI GET/HEAD operation or an explicitly audited semantically read-only POST lookup. Use search_esi_operations and get_esi_operation to choose the operation and inputs. Only parameters declared by the pinned OpenAPI schema are accepted. Mutating operations cannot be selected.",
+        "Read one EVE Online ESI page via catalogued GET/HEAD or audited read-only POST. First use search_esi_operations and get_esi_operation. Only pinned-schema parameters are accepted; mutations are excluded.",
       inputSchema: z.object({
         operationId: z.string().min(1),
         actingCharacterId: positiveSafeInteger
@@ -494,28 +701,58 @@ export function createEveServer(
           .describe(
             "JSON body for explicitly audited, semantically read-only bulk lookup POST operations",
           ),
+        response: responseSelectionSchema.optional(),
       }),
-      outputSchema: toolOutputSchemas.call_esi,
+      outputSchema: compactOutputSchema(toolOutputSchemas.call_esi),
       annotations: READ_ONLY_ANNOTATIONS,
     },
-    async ({ operationId, actingCharacterId, path, query, headers, body }) => {
+    async ({
+      operationId,
+      actingCharacterId,
+      path,
+      query,
+      headers,
+      body,
+      response,
+    }) => {
       return withSpan(
         "eve.tool.call_esi",
         { "gen_ai.tool.name": "call_esi" },
         async () => {
           try {
-            return textResult(
-              await client.call({
+            const operation = catalog.get(operationId);
+            if (
+              response?.snapshot &&
+              operation.requiredScopes.length > 0 &&
+              typeof path?.character_id !== "number" &&
+              actingCharacterId === undefined
+            )
+              throw new EsiRequestError(
+                "Continuations require the original actingCharacterId returned by call_esi.",
+                undefined,
+                undefined,
+                { code: "CHARACTER_SELECTION_REQUIRED", retryable: false },
+              );
+            const result = await client.call({
+              operationId,
+              ...(actingCharacterId === undefined ? {} : { actingCharacterId }),
+              ...(path ? { path } : {}),
+              ...(query ? { query } : {}),
+              ...(headers ? { headers } : {}),
+              ...(body === undefined ? {} : { body }),
+            } satisfies EsiCallInput);
+            const { data, ...source } = result;
+            return textResult({
+              ...source,
+              ...(await pageJson(data, response, undefined, {
                 operationId,
-                ...(actingCharacterId === undefined
-                  ? {}
-                  : { actingCharacterId }),
-                ...(path ? { path } : {}),
-                ...(query ? { query } : {}),
-                ...(headers ? { headers } : {}),
-                ...(body === undefined ? {} : { body }),
-              } satisfies EsiCallInput),
-            );
+                path,
+                query,
+                headers,
+                body,
+                actingCharacterId: result.actingCharacterId,
+              })),
+            });
           } catch (error) {
             return errorResult(error);
           }
@@ -534,13 +771,14 @@ export function createEveServer(
         .object({
           names: z.array(z.string().min(1).max(100)).min(1).max(500).optional(),
           ids: z.array(positiveSafeInteger).min(1).max(1000).optional(),
+          response: responseSelectionSchema.optional(),
         })
         .strict()
         .refine(
           (value) => (value.names === undefined) !== (value.ids === undefined),
           "Supply exactly one of names or ids",
         ),
-      outputSchema: toolOutputSchemas.resolve_eve_entities,
+      outputSchema: compactOutputSchema(toolOutputSchemas.resolve_eve_entities),
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async (input) => {
@@ -549,12 +787,17 @@ export function createEveServer(
         { "gen_ai.tool.name": "resolve_eve_entities" },
         async () => {
           try {
-            return textResult(
-              await resolveEveEntities(
-                client,
-                input.names ? { names: input.names } : { ids: input.ids ?? [] },
-              ),
+            const result = await resolveEveEntities(
+              client,
+              input.names ? { names: input.names } : { ids: input.ids ?? [] },
             );
+            const { results, ...summary } = result;
+            const page = await pageJson(results, input.response);
+            return textResult({
+              ...summary,
+              results: page.data,
+              output: page.output,
+            });
           } catch (error) {
             return errorResult(error);
           }
@@ -592,22 +835,59 @@ export function createEveServer(
             .describe(
               "Only the sections needed: profile, location, ship, skills, skillQueue, wallet. For training questions select skills and skillQueue",
             ),
+          response: responseSelectionSchema
+            .optional()
+            .describe(
+              "Detail selection within section data. Supply exactly one section when using this option.",
+            ),
         })
         .strict(),
-      outputSchema: toolOutputSchemas.get_character_context,
+      outputSchema: compactOutputSchema(
+        toolOutputSchemas.get_character_context,
+      ),
       annotations: READ_ONLY_ANNOTATIONS,
     },
-    async ({ characterId, sections }) => {
+    async ({ characterId, sections, response }) => {
       return withSpan(
         "eve.tool.get_character_context",
         { "gen_ai.tool.name": "get_character_context" },
         async () => {
           try {
+            if (response && sections.length !== 1)
+              throw new EsiRequestError(
+                "Select exactly one character section when requesting response details.",
+                undefined,
+                undefined,
+                { code: "VALIDATION_ERROR", retryable: false },
+              );
             const result = await getCharacterContext(client, catalog, {
               characterId,
               sections,
             });
-            return textResult(result, result.status === "failed");
+            const boundedSections: Record<string, unknown> = {};
+            for (const [name, raw] of Object.entries(
+              result.sections as Record<
+                string,
+                { status: string; data?: unknown; source?: unknown }
+              >,
+            )) {
+              boundedSections[name] =
+                raw.status === "ok"
+                  ? {
+                      ...raw,
+                      ...(await pageJson(
+                        raw.data,
+                        response,
+                        sections.length === 1 ? 8000 : 2500,
+                        { characterId, section: name },
+                      )),
+                    }
+                  : raw;
+            }
+            return textResult(
+              { ...result, sections: boundedSections },
+              result.status === "failed",
+            );
           } catch (error) {
             return errorResult(error);
           }
@@ -630,7 +910,7 @@ export function createEveServer(
           maxPages: z.number().int().min(1).max(10).default(3),
         })
         .strict(),
-      outputSchema: toolOutputSchemas.get_market_snapshot,
+      outputSchema: compactOutputSchema(toolOutputSchemas.get_market_snapshot),
       annotations: READ_ONLY_ANNOTATIONS,
     },
     async ({ regionId, typeId, locationId, maxPages }) => {

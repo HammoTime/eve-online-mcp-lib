@@ -13,6 +13,7 @@ import { EsiClient } from "../src/esi-client.js";
 import { OperationCatalog, publicOperation } from "../src/openapi.js";
 import { createEveServer } from "../src/server.js";
 import { toolOutputSchemas } from "../src/tool-output-schemas.js";
+import { ZKillboardClient } from "../src/zkillboard.js";
 import * as telemetry from "../src/telemetry.js";
 import { fixtureDocument } from "./fixtures.js";
 import { loadOpenApiDocument } from "./openapi-fixture.js";
@@ -55,7 +56,7 @@ function textEquivalent(result: CallToolResult) {
   expect(result.content).toHaveLength(1);
   expect(result.content[0]).toEqual({
     type: "text",
-    text: JSON.stringify(result.structuredContent, null, 2),
+    text: JSON.stringify(result.structuredContent),
   });
   expect(result.structuredContent).not.toHaveProperty("result");
   expect(result._meta).toBeDefined();
@@ -226,6 +227,26 @@ async function setup(
       identity: { name: "output-contract-test", version: "1.0.0" },
       staticData,
       authentication,
+      zkillboard: new ZKillboardClient({
+        fetchImplementation: vi.fn<typeof fetch>(() =>
+          Promise.resolve(
+            Response.json([
+              {
+                killmail_id: 123,
+                killmail_time: "2026-09-20T12:00:00Z",
+                solar_system_id: 30000142,
+                victim: { ship_type_id: 587 },
+                attackers: [],
+                zkb: { totalValue: 1000 },
+              },
+            ]),
+          ),
+        ),
+        now: (() => {
+          let time = 0;
+          return () => (time += 1000);
+        })(),
+      }),
       ...(options.hosted
         ? { hostedAuthorizationUrl: "https://example.invalid" }
         : {}),
@@ -344,18 +365,26 @@ async function setup(
 
 describe("core tool output contracts", () => {
   it.each(["2025-03-26", "2025-11-25", "2026-07-28"])(
-    "lists and calls all 13 object-root contracts without rewrapping on %s",
+    "lists and calls all 15 object-root contracts without rewrapping on %s",
     async (version) => {
       vi.spyOn(telemetry, "diagnosticMetadata").mockReturnValue({
         "eve/trace-id": "a".repeat(32),
       });
       const { tools, client, call, check } = await setup({ version });
+      expect(Buffer.byteLength(JSON.stringify({ tools }))).toBeLessThan(70_000);
       expect(tools.map((tool) => tool.name).sort()).toEqual(
         Object.keys(toolOutputSchemas).sort(),
       );
       const cases: [ToolName, Record<string, unknown>, string, unknown][] = [
+        [
+          "search_zkillmails",
+          { entityType: "character", entityId: 42 },
+          "complete",
+          true,
+        ],
+        ["get_zkillmail", { killmailId: 123 }, "output", {}],
         ["initialize_static_data", {}, "stale", "false"],
-        ["resolve_skill_plan_targets", { target: "Mining II" }, "targets", {}],
+        ["resolve_skill_plan_targets", { target: "Mining II" }, "output", {}],
         [
           "get_skill_dependencies",
           { target: "Test Hull" },
@@ -365,11 +394,11 @@ describe("core tool output contracts", () => {
         [
           "generate_skill_plan",
           { characterId: 42, target: "Exhumers II" },
-          "plan",
+          "counts",
           {},
         ],
-        ["list_eve_characters", {}, "characters", {}],
-        ["authorize_eve_character", { characterId: 42 }, "characters", {}],
+        ["list_eve_characters", {}, "output", {}],
+        ["authorize_eve_character", { characterId: 42 }, "output", {}],
         [
           "select_eve_character",
           { characterId: 42 },
@@ -431,7 +460,15 @@ describe("core tool output contracts", () => {
         arguments: {},
       });
       expect(result._meta).toMatchObject({ "eve/trace-id": "a".repeat(32) });
-      expect(result.structuredContent).toEqual(characterList);
+      expect(result.structuredContent).toMatchObject({
+        characters: [
+          { characterId: 42, characterName: "Synthetic Pilot", scopeCount: 1 },
+        ],
+        output: { complete: true },
+      });
+      expect(JSON.stringify(result.structuredContent)).not.toContain(
+        "esi-skills.read_skills.v1",
+      );
     },
   );
 
@@ -471,11 +508,11 @@ describe("core tool output contracts", () => {
     const { call, fetcher } = await setup({ catalog, authenticated: false });
     expect(catalog.operations.length).toBeGreaterThan(0);
     const searched: string[] = [];
-    for (let offset = 0; offset < catalog.operations.length; offset += 100) {
+    for (let offset = 0; offset < catalog.operations.length; offset += 25) {
       const page = toolOutputSchemas.search_esi_operations.parse(
-        await call("search_esi_operations", { offset, limit: 100 }),
+        await call("search_esi_operations", { offset, limit: 25 }),
       );
-      const expected = catalog.operations.slice(offset, offset + 100);
+      const expected = catalog.operations.slice(offset, offset + 25);
       expect(page).toMatchObject({
         count: expected.length,
         totalMatches: catalog.operations.length,
@@ -491,7 +528,11 @@ describe("core tool output contracts", () => {
         if (!descriptor) throw new Error("Unexpected search operation");
         const { matchReasons, ...summary } = match;
         expect(matchReasons).toEqual([]);
-        expect(summary).toEqual(publicOperation(descriptor));
+        expect(summary).toEqual({
+          operationId: descriptor.operationId,
+          summary: descriptor.summary,
+          authenticated: descriptor.requiredScopes.length > 0,
+        });
         searched.push(match.operationId);
       }
     }
@@ -600,7 +641,9 @@ describe("core tool output contracts", () => {
     const resolved = toolOutputSchemas.resolve_skill_plan_targets.parse(
       await call("resolve_skill_plan_targets", { targets }),
     );
-    expect(resolved.targets.map((target) => target.status)).toEqual([
+    expect(
+      (resolved.targets as { status: string }[]).map((target) => target.status),
+    ).toEqual([
       "resolved",
       "resolved",
       "resolved",
@@ -633,19 +676,39 @@ describe("core tool output contracts", () => {
         }),
       );
       if (plan.status !== "complete") throw new Error("Expected complete plan");
-      expect(plan.retainedQueue[0]).toMatchObject({
-        level_end_sp: 1415,
-        start_date: expect.any(String),
-        finish_date: expect.any(String),
+      const details = async (path: string[]) =>
+        call("generate_skill_plan", {
+          characterId: 42,
+          target: "Exhumers II",
+          queuePolicy,
+          response: { path, snapshot: plan.output.snapshot },
+        });
+      expect(await details(["retainedQueue"])).toMatchObject({
+        data: [
+          {
+            level_end_sp: 1415,
+            start_date: expect.any(String),
+            finish_date: expect.any(String),
+          },
+        ],
       });
-      expect(plan.plan[0]).toHaveProperty("prerequisites");
-      expect(plan.plan[0]).toHaveProperty("key");
-      expect(plan.acquisitionChecks).toEqual([
-        { skillId: 200, name: "Exhumers", action: expect.any(String) },
-      ]);
+      expect((plan.data as Record<string, unknown>[])[0]).not.toHaveProperty(
+        "prerequisites",
+      );
+      expect((plan.data as Record<string, unknown>[])[0]).toMatchObject({
+        observedTrainedLevel: expect.any(Number),
+        observedActiveLevel: expect.any(Number),
+        baselineLevel: expect.any(Number),
+      });
+      expect(await details(["graph"])).toMatchObject({
+        data: { nodes: expect.any(Array), edges: expect.any(Array) },
+      });
+      expect(await details(["acquisitionChecks"])).toMatchObject({
+        data: [{ skillId: 200, name: "Exhumers", action: expect.any(String) }],
+      });
       check(
         "generate_skill_plan",
-        { ...plan, plan: [{ ...plan.plan[0], observedTrainedLevel: 6 }] },
+        { ...plan, counts: { ...plan.counts, plan: -1 } },
         false,
       );
     }
@@ -686,11 +749,9 @@ describe("core tool output contracts", () => {
       }),
     ).toMatchObject({
       status: "complete",
-      plan: [],
-      trainingText: "",
+      data: [],
       additionalSkillPointsEstimate: 0,
-      graph: { nodes: [], edges: [] },
-      retainedQueue: [{ skill_id: 100, finished_level: 1, queue_position: 0 }],
+      counts: { plan: 0, graphNodes: 0, retainedQueue: 1 },
     });
   });
 

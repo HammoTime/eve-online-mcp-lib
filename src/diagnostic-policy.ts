@@ -11,6 +11,8 @@ export const TOOL_NAMES = new Set([
   "search_esi_operations",
   "get_esi_operation",
   "call_esi",
+  "search_zkillmails",
+  "get_zkillmail",
   "resolve_eve_entities",
   "get_character_context",
   "get_market_snapshot",
@@ -213,5 +215,17 @@ export function projectOutput(value: unknown, depth = 0): Attributes {
     attrs["eve.output.graph.node_count"] = graph.nodes.length;
   if (Array.isArray(graph.edges))
     attrs["eve.output.graph.edge_count"] = graph.edges.length;
+  // Compact MCP views retain full graph totals independently of selected rows.
+  // Reuse the existing closed numeric attributes; never inspect arbitrary data
+  // paths, continuation digests or omitted member names.
+  const counts = object(data.counts);
+  for (const [key, attribute] of [
+    ["graphNodes", "eve.output.graph.node_count"],
+    ["graphEdges", "eve.output.graph.edge_count"],
+  ] as const) {
+    const value = counts[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+      attrs[attribute] = value;
+  }
   return attrs;
 }

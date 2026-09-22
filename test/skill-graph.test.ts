@@ -12,7 +12,7 @@ import {
   trainingText,
 } from "../src/skill-graph.js";
 import { skill, skillFixture } from "./skill-fixtures.js";
-import { toolOutputSchemas } from "../src/tool-output-schemas.js";
+import { resolvedTargetSchema } from "../src/tool-output-schemas.js";
 
 describe("deterministic skill target resolution", () => {
   const catalog = new SkillCatalog(skillFixture());
@@ -38,14 +38,11 @@ describe("deterministic skill target resolution", () => {
           })),
         ...(count > 20 ? { candidatesTruncated: true } : {}),
       });
-      const output = { staticData: {}, targets: [result] };
+      expect(resolvedTargetSchema.parse(result)).toEqual(result);
       expect(
-        toolOutputSchemas.resolve_skill_plan_targets.parse(output),
-      ).toEqual(output);
-      expect(
-        toolOutputSchemas.resolve_skill_plan_targets.safeParse({
-          ...output,
-          targets: [{ ...result, candidatesTruncated: "true" }],
+        resolvedTargetSchema.safeParse({
+          ...result,
+          candidatesTruncated: "true",
         }).success,
       ).toBe(false);
     },

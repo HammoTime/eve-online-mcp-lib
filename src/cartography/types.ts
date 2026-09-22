@@ -110,7 +110,7 @@ export const mapRequestSchema = z
     theme: z.enum(["dark", "light"]).default("dark"),
     layout: z.enum(["atlas", "geographic"]).default("atlas"),
     size: z.enum(["standard", "wide"]).default("standard"),
-    preview: z.enum(["png", "none"]).default("png"),
+    preview: z.enum(["png", "none"]).default("none"),
   })
   .strict()
   .refine(
