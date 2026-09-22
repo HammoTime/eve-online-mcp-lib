@@ -51,7 +51,7 @@ const id = "a".repeat(32);
 const request = {
   boundary: { kind: "systems", systems: [1, 2, 3] },
   pointsOfInterest: [{ system: 1, label: "Existing plan marker" }],
-  routes: [{ systems: [1, 2] }],
+  routes: [],
   preview: "none",
 };
 const connections: { close(): Promise<void> }[] = [];
@@ -231,14 +231,12 @@ describe("renderer-only map MCP", () => {
     expect(finish).toHaveBeenCalledTimes(4);
     expect(services.artifacts.put).toHaveBeenCalledTimes(1);
   });
-  it("requires an explicit boundary and POI list and exposes no planning arguments", async () => {
+  it("requires a route handle or an explicit context boundary and POI list", async () => {
     const { client, services } = await setup();
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name)).toEqual(["render_eve_map"]);
-    expect(tools[0]?.inputSchema.required).toEqual(
-      expect.arrayContaining(["boundary", "pointsOfInterest"]),
-    );
-    expect(tools[0]?.description).toContain("Never creates plans");
+    expect(tools[0]?.inputSchema.properties).toHaveProperty("routeId");
+    expect(tools[0]?.description).toContain("plan_eve_route");
     expect(tools[0]?.description).toContain("kind:'neighborhood'");
     expect(tools[0]?.description).toContain(
       "without ESI discovery or per-neighbor calls",
@@ -251,6 +249,7 @@ describe("renderer-only map MCP", () => {
     for (const invalid of [
       {},
       { boundary: request.boundary },
+      { ...request, routes: [{ systems: [1, 2] }] },
       { ...request, from: "Test 1", to: "Test 2" },
       {
         ...request,
@@ -281,11 +280,11 @@ describe("renderer-only map MCP", () => {
     expect(result.content.some((block) => block.type === "image")).toBe(false);
     expect(services.preview?.render).not.toHaveBeenCalled();
   });
-  it("returns the original SVG resource, framed boundary and POI list without changing supplied routes", async () => {
+  it("returns the original SVG resource, framed boundary and POI list for a context map", async () => {
     const { client, services } = await setup();
     const result = await client.callTool({
       name: "render_eve_map",
-      arguments: { ...request, routes: [{ systems: [1, 2, 1] }] },
+      arguments: request,
     });
     expect(result.isError).not.toBe(true);
     expect(mapResultSchema.safeParse(result.structuredContent).success).toBe(
@@ -296,7 +295,7 @@ describe("renderer-only map MCP", () => {
       preview: { status: "not_requested" },
       summary: {
         systemCount: 3,
-        routes: [{ systems: [{ id: 1 }, { id: 2 }, { id: 1 }], jumps: 2 }],
+        routes: [],
       },
     });
     expect(result.content).toEqual(
@@ -365,7 +364,7 @@ describe("renderer-only map MCP", () => {
     const { client, services } = await setup();
     for (const invalid of [
       { ...request, routes: [{ systems: [1, 3] }] },
-      { ...request, boundary: { kind: "systems", systems: [1] } },
+      { ...request, boundary: { kind: "systems", systems: [2] } },
     ])
       expect(
         (await client.callTool({ name: "render_eve_map", arguments: invalid }))

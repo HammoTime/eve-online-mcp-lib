@@ -1,6 +1,7 @@
 import type { MapCatalog } from "./catalog.js";
 import type { PreparedMapScene } from "./prepared.js";
 import type { MapDataStatus, MapRequest, RenderedMap } from "./types.js";
+import type { RouteGraphSource } from "../route-plan.js";
 
 export interface MapDataSource {
   initialize: (
@@ -44,6 +45,7 @@ export interface MapPreview {
   }>;
 }
 export interface CartographyServices {
+  routing?: RouteGraphSource;
   /** Host admission/cancellation. Cleanup runs when the actual render settles,
    * including errors, not when Streamable HTTP returns its response headers. */
   beginRender?: (signal: AbortSignal) => () => void;

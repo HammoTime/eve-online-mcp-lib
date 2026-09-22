@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import type { RoutePlan } from "../route-plan.js";
 
 export const MAP_LIMITS = {
   systems: 250,
@@ -167,6 +168,8 @@ export class MapError extends Error {
   }
 }
 export interface RenderedMap {
+  /** Present only on artifacts produced from a server-computed route. */
+  routePlan?: RoutePlan;
   svg: string;
   width: number;
   height: number;

@@ -183,17 +183,21 @@ Publish library commits before updating a consumer's Git submodule pointer.
 
 ## Cartography extension
 
-Optional `cartography` services in `createEveServer` register `render_eve_map` and
-artifact resource templates. The shared `src/cartography` core is runtime-independent;
-consumers supply public SDE map data, private artifact storage and optionally a PNG
-preview adapter. It is a renderer only: `boundary` and `pointsOfInterest` are required,
-and supplied route sequences are validated without planning, repair or expansion.
-There is no ESI/planner/auth dependency in the renderer or its registration module.
+Optional `cartography` services register `render_eve_map` and artifact resource
+templates; a `routing` adapter additionally registers `plan_eve_route` and
+`plan_eve_travel`. Consumers supply public SDE data, private artifact storage and
+an optional PNG adapter. The runtime-independent planner owns exact directed
+shortest paths, stop optimization, replay and totals. The renderer accepts its
+opaque `routeId`, or a context `boundary` and `pointsOfInterest` without routes.
+Nonempty caller-supplied route arrays are rejected. Dense route maps fall back to
+server-rendered itinerary pages. See [architecture and limits](docs/route-planning.md).
+The assistant must never compute, merge or replace route or skill plans; tool
+failures are reported, not worked around with scripts or model reasoning.
 Request `boundary: { kind: "neighborhood", center: "Jita", jumps: 1 }` directly
 for a center and all its distinct incoming/outgoing permanent-stargate neighbors
 from validated SDE, without an ESI discovery chain. Names/IDs use the existing exact
 reference resolver. `jumps` defaults to `1`; other values are rejected. Selection
-never expands POIs/routes or a second hop, and the existing 250-system limit fails
+never expands POIs or a second hop, and the existing 250-system limit fails
 with the complete count rather than trimming the neighborhood.
 Absent adapters leave existing consumers unchanged. Never expose stored artifacts
 across users without an owner-scoped adapter; base geography being public does not
