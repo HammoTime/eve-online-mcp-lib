@@ -148,7 +148,8 @@ export class ZKillboardClient {
   constructor(
     options: { fetchImplementation?: typeof fetch; now?: () => number } = {},
   ) {
-    this.fetch = options.fetchImplementation ?? globalThis.fetch;
+    this.fetch =
+      options.fetchImplementation ?? globalThis.fetch.bind(globalThis);
     this.now = options.now ?? Date.now;
   }
 
@@ -295,7 +296,7 @@ export class ZKillboardClient {
       const response = await abortable(
         this.fetch(url, {
           method: "GET",
-          redirect: "error",
+          redirect: "manual",
           credentials: "omit",
           signal: controller.signal,
           headers: {

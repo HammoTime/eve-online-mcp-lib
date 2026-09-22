@@ -10,9 +10,42 @@ export const killmail = (id = 123) => ({
   zkb: { hash: "a".repeat(40), totalValue: 1000, solo: true },
 });
 const query = { entityType: "character" as const, entityId: 42 };
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("public zKillboard client", () => {
+  it("binds the default Web fetch receiver for Workers and browsers", async () => {
+    const fetcher = vi.fn(function (this: unknown) {
+      expect(this).toBe(globalThis);
+      return Promise.resolve(Response.json([killmail()]));
+    });
+    vi.stubGlobal("fetch", fetcher);
+    expect(
+      (await new ZKillboardClient().get({ killmailId: 123 })).data.killmail_id,
+    ).toBe(123);
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([301, 302, 307, 308])(
+    "rejects redirects without following the destination: %i",
+    async (status) => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(null, {
+          status,
+          headers: { location: "https://untrusted.invalid/" },
+        }),
+      );
+      const client = new ZKillboardClient({ fetchImplementation: fetcher });
+      await expect(client.search(query)).rejects.toMatchObject({
+        code: "UPSTREAM_ERROR",
+        status,
+        retryable: false,
+      });
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe("manual");
+    },
+  );
   it("builds only fixed GET paths, sends project headers and caches isolated copies for an hour", async () => {
     let now = Date.parse("2026-09-22T00:00:00Z");
     const fetcher = vi.fn<typeof fetch>(() =>
@@ -37,7 +70,7 @@ describe("public zKillboard client", () => {
     const init = fetcher.mock.calls[0]?.[1];
     expect(init).toMatchObject({
       method: "GET",
-      redirect: "error",
+      redirect: "manual",
       credentials: "omit",
     });
     const headers = new Headers(init?.headers);
