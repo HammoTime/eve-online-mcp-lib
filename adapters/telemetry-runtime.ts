@@ -2,6 +2,7 @@
 import {
   context,
   ROOT_CONTEXT,
+  SeverityNumber,
   SpanKind,
   SpanStatusCode,
   type Context,
@@ -10,10 +11,10 @@ import {
 import { suppressTracing } from "@opentelemetry/core";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
-  BasicTracerProvider,
+  TracerProvider,
   type ReadableSpan,
   type SpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import {
   AggregationTemporality,
   AggregationType,
@@ -70,7 +71,7 @@ export class TelemetryRuntime {
   private bytes = 0;
   private logBytes = 0;
   private dropped = 0;
-  private readonly traces: BasicTracerProvider;
+  private readonly traces: TracerProvider;
   private readonly meters: MeterProvider;
   private readonly loggers: LoggerProvider;
   private readonly reader = new DeltaReader();
@@ -123,7 +124,7 @@ export class TelemetryRuntime {
       forceFlush: () => Promise.resolve(),
       shutdown: () => Promise.resolve(),
     };
-    this.traces = new BasicTracerProvider({
+    this.traces = new TracerProvider({
       resource,
       spanProcessors: [processor],
       spanLimits: {
@@ -187,7 +188,10 @@ export class TelemetryRuntime {
   emit = (record: DiagnosticRecord): void => {
     this.logger.emit({
       body: record.event,
-      severityNumber: record.event === "exception" ? 17 : 9,
+      severityNumber:
+        record.event === "exception"
+          ? SeverityNumber.ERROR
+          : SeverityNumber.INFO,
       attributes: record.attributes,
       context: context.active(),
     });

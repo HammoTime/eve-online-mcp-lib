@@ -101,7 +101,7 @@ export function projectInput(
     if (typeof item === "string" && ENUMS[key]?.includes(item)) allowed = true;
     if (allowed) {
       result[key] = item;
-      attrs[`eve.input.${key}`] = item as string | number | boolean;
+      attrs[`eve.input.${key}`] = item;
     } else if (["path", "query", "target"].includes(key)) {
       const nested = projectInput(item, knownOperation, depth + 1);
       result[key] = nested.value;

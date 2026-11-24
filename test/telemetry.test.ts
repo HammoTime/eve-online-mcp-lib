@@ -2,10 +2,10 @@ import { afterAll, describe, expect, it } from "vitest";
 import { context, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-  BasicTracerProvider,
+  TracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { withSpan, withSpanSync, withTracer } from "../src/telemetry.js";
 
 describe("runtime-neutral telemetry", () => {
@@ -19,8 +19,8 @@ describe("runtime-neutral telemetry", () => {
     const exporters = [new InMemorySpanExporter(), new InMemorySpanExporter()];
     const providers = exporters.map(
       (exporter) =>
-        new BasicTracerProvider({
-          spanProcessors: [new SimpleSpanProcessor(exporter)],
+        new TracerProvider({
+          spanProcessors: [new SimpleSpanProcessor({ exporter })],
         }),
     );
     await Promise.all(

@@ -2,10 +2,10 @@ import { afterAll, expect, it, vi } from "vitest";
 import { context, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-  BasicTracerProvider,
+  TracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { createMcpHandler, type Transport } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -83,8 +83,8 @@ it.each([
   "completes real %s MCP %s while ESI refresh remains unsettled",
   async (mode, action) => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    const provider = new TracerProvider({
+      spanProcessors: [new SimpleSpanProcessor({ exporter })],
     });
     const completions: Promise<void>[] = [];
     const manifests: ReplayManifest[] = [];
@@ -260,8 +260,8 @@ it.each([
 it("does not expose malformed private output values in SDK errors or telemetry", async () => {
   const sentinel = "private-output-validation-canary";
   const exporter = new InMemorySpanExporter();
-  const provider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  const provider = new TracerProvider({
+    spanProcessors: [new SimpleSpanProcessor({ exporter })],
   });
   const server = new ObservedMcpServer({ name: "test", version: "1" });
   const client = new Client({ name: "test", version: "1" });
@@ -335,8 +335,8 @@ it.each(["json", "sse"] as const)(
   "classifies real modern %s terminal sends before normal close cleanup",
   async (responseMode) => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    const provider = new TracerProvider({
+      spanProcessors: [new SimpleSpanProcessor({ exporter })],
     });
     const completions: Promise<void>[] = [];
     const handler = createMcpHandler(
@@ -423,8 +423,8 @@ it.each(["json", "sse"] as const)(
       "batch",
     ] as const) {
       const exporter = new InMemorySpanExporter();
-      const provider = new BasicTracerProvider({
-        spanProcessors: [new SimpleSpanProcessor(exporter)],
+      const provider = new TracerProvider({
+        spanProcessors: [new SimpleSpanProcessor({ exporter })],
       });
       const completions: Promise<void>[] = [];
       const writes: Promise<void>[] = [];
@@ -609,8 +609,8 @@ it.each([
   async (mode) => {
     vi.useFakeTimers();
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    const provider = new TracerProvider({
+      spanProcessors: [new SimpleSpanProcessor({ exporter })],
     });
     const completions: Promise<void>[] = [];
     const manifests: ReplayManifest[] = [];
@@ -783,8 +783,8 @@ it.each([
 );
 it("isolates concurrent requests and reused IDs from cancelled sends settling late", async () => {
   const exporter = new InMemorySpanExporter();
-  const provider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  const provider = new TracerProvider({
+    spanProcessors: [new SimpleSpanProcessor({ exporter })],
   });
   const server = new ObservedMcpServer({ name: "test", version: "1" });
   server.protocolVersionHint = "2025-11-25";
@@ -892,8 +892,8 @@ it.each(["delayed_send", "failed_send", "cancelled", "validation"] as const)(
   "finishes MCP spans correctly for %s",
   async (mode) => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    const provider = new TracerProvider({
+      spanProcessors: [new SimpleSpanProcessor({ exporter })],
     });
     const server = new ObservedMcpServer({ name: "test", version: "1" });
     server.protocolVersionHint = "2025-11-25";

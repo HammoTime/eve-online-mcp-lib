@@ -2,10 +2,10 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-  BasicTracerProvider,
+  TracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { createEveServer } from "../src/server.js";
 import { EsiClient } from "../src/esi-client.js";
@@ -39,7 +39,7 @@ afterAll(() => {
 });
 describe("MCP diagnostic evidence", () => {
   it("marks failed public catalog acquisition partial with a fixed reason and no exception details", async () => {
-    const provider = new BasicTracerProvider();
+    const provider = new TracerProvider();
     const catalog = new OperationCatalog(fixtureDocument());
     const captures: ReplayManifest[] = [];
     const getAccessToken = vi.fn(() => Promise.resolve(undefined));
@@ -141,7 +141,7 @@ describe("MCP diagnostic evidence", () => {
     artifact.mockRestore();
   });
   it("snapshots public static data and replays the dependency graph without downloading SDE", async () => {
-    const provider = new BasicTracerProvider();
+    const provider = new TracerProvider();
     const document = fixtureDocument(),
       data = skillFixture();
     const captures: ReplayManifest[] = [];
@@ -261,8 +261,8 @@ describe("MCP diagnostic evidence", () => {
   );
   it("captures a partial market result with nested spans and reproduces it through MCP offline", async () => {
     const exporter = new InMemorySpanExporter();
-    const provider = new BasicTracerProvider({
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    const provider = new TracerProvider({
+      spanProcessors: [new SimpleSpanProcessor({ exporter })],
     });
     const captures: ReplayManifest[] = [];
     const document = fixtureDocument(),

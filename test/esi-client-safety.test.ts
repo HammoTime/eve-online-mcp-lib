@@ -2,10 +2,10 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { context, createContextKey, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-  BasicTracerProvider,
+  TracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { RefreshTokenProvider, StaticTokenProvider } from "../src/auth.js";
 import {
   EsiClient,
@@ -682,8 +682,8 @@ describe("ESI cache and single-flight safety", () => {
     "drains request-owned %s activities before a nested refresh can %s late",
     async (api, lateOutcome) => {
       const exporter = new InMemorySpanExporter();
-      const traces = new BasicTracerProvider({
-        spanProcessors: [new SimpleSpanProcessor(exporter)],
+      const traces = new TracerProvider({
+        spanProcessors: [new SimpleSpanProcessor({ exporter })],
       });
       const activities = new Set<Promise<void>>();
       const completions: Promise<void>[] = [];
@@ -812,7 +812,7 @@ describe("ESI cache and single-flight safety", () => {
     const persisting = deferred<undefined>();
     const activities = new Set<Promise<void>>();
     const completions: Promise<void>[] = [];
-    const traces = new BasicTracerProvider();
+    const traces = new TracerProvider();
     const controller = new AbortController();
     const refreshFetch = vi.fn<typeof fetch>(() => fetching.promise);
     const persist = vi.fn(() =>
