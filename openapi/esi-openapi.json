@@ -3315,6 +3315,7 @@
                 "bounty_surcharge",
                 "brokers_fee",
                 "campaign_objective_isk_reward",
+                "campaign_objective_isk_reward_tax",
                 "clone_activation",
                 "clone_transfer",
                 "contraband_fine",
@@ -7505,6 +7506,7 @@
                 "bounty_surcharge",
                 "brokers_fee",
                 "campaign_objective_isk_reward",
+                "campaign_objective_isk_reward_tax",
                 "clone_activation",
                 "clone_transfer",
                 "contraband_fine",
@@ -11617,7 +11619,7 @@
       "url": "https://developers.eveonline.com/license-agreement"
     },
     "termsOfService": "https://support.eveonline.com/hc/en-us/articles/8414770561948-EVE-Online-Terms-of-Service",
-    "title": "EVE SKINR Ingenuity (ESI) - tranquility",
+    "title": "EVE Static Information (ESI) - tranquility",
     "version": "2020-01-01"
   },
   "openapi": "3.1.0",
